@@ -31,15 +31,36 @@ def _default_dataset_name(file_path: str) -> str:
     return stem or "default"
 
 
-def run_pipeline(file_path: str, verbose: bool = True, df=None, dataset_name: str | None = None) -> dict:
+_UNSET = object()  # sentinel: distinguishes "caller didn't pass this" from "caller passed None"
+
+
+def run_pipeline(
+    file_path: str,
+    verbose: bool = True,
+    df=None,
+    dataset_name: str | None = None,
+    baseline_profile=_UNSET,
+    persist_profile_locally: bool = True,
+) -> dict:
     """Run ingest -> profile -> quality checks -> health score.
 
     `df` lets a caller that already loaded the file (e.g.
-    run_pipeline_and_store, or the future /ingest endpoint) pass it in
+    run_pipeline_and_store, or the FastAPI /ingest endpoint) pass it in
     directly instead of having this function re-read the file from disk.
     `dataset_name` groups this run with other runs of the same logical
     dataset (see db.models.QualityRun.dataset_name) — defaults to the
     source filename's stem.
+
+    `baseline_profile`, if given, is used as-is instead of looking one up
+    from the local flat-file store — this is what lets a DB-aware caller
+    (api/main.py) pass a baseline loaded from Postgres via
+    db.queries.get_latest_profile, which works correctly across multiple
+    backend instances; the flat-file lookup below only reflects THIS
+    process's own disk, which is fine for the single-process CLI/test path
+    this function was originally built for, but not for a scaled-out API.
+    `persist_profile_locally=False` skips the matching local-disk write,
+    for the same DB-backed caller (it persists the profile via
+    db.store.store_pipeline_result instead — see db.models.DatasetProfile).
     """
     run_id = str(uuid.uuid4())[:8]
     dataset_name = dataset_name or _default_dataset_name(file_path)
@@ -51,7 +72,8 @@ def run_pipeline(file_path: str, verbose: bool = True, df=None, dataset_name: st
     # 2. Profile (and load the prior run's profile, FOR THIS DATASET, as a
     # schema-drift baseline — a different dataset's profile is not a valid
     # baseline, see profiling.profiler.save_profile's docstring)
-    baseline_profile = load_profile("latest", dataset_name=dataset_name)
+    if baseline_profile is _UNSET:
+        baseline_profile = load_profile("latest", dataset_name=dataset_name)
     profile = profile_dataframe(df)
 
     # 3. Quality checks. No column names are assumed — guess_entity_column /
@@ -69,9 +91,11 @@ def run_pipeline(file_path: str, verbose: bool = True, df=None, dataset_name: st
     # 4. Health score
     score_result = compute_health_score(issues)
 
-    # Persist this run's profile so the *next* run of THIS dataset has a
-    # schema-drift baseline.
-    save_profile(profile, run_id, dataset_name=dataset_name)
+    # Persist this run's profile locally so the *next* run of THIS dataset
+    # has a schema-drift baseline — skipped when the caller will persist it
+    # to Postgres instead (see db.models.DatasetProfile).
+    if persist_profile_locally:
+        save_profile(profile, run_id, dataset_name=dataset_name)
 
     result = {
         "run_id": run_id,
@@ -120,20 +144,34 @@ def _print_report(result: dict) -> None:
     print(f"{'=' * 60}\n")
 
 
-def run_pipeline_and_store(file_path: str, verbose: bool = True) -> dict:
-    """Same as run_pipeline(), but also persists the result to Postgres.
-    Kept as a separate entry point so the DB-free pipeline stays usable on
-    its own (see tests/test_pipeline_end_to_end.py) — this is what the
-    FastAPI /ingest endpoint will call in stage 3.
+def run_pipeline_and_store(file_path: str, verbose: bool = True, dataset_name: str | None = None) -> dict:
+    """Same as run_pipeline(), but also persists the result to Postgres —
+    including the schema-drift baseline lookup/persistence, which comes
+    from and goes to Postgres here (db.queries.get_latest_profile /
+    db.models.DatasetProfile) rather than local disk, so this works
+    correctly no matter how many backend instances are running. Kept as a
+    separate entry point so the DB-free pipeline stays usable on its own
+    (see tests/test_pipeline_end_to_end.py) — this is what the FastAPI
+    /ingest endpoint effectively does (see api/main.py).
     """
     from db.database import SessionLocal
+    from db.queries import get_latest_profile
     from db.store import store_pipeline_result
 
     df = load_structured(file_path)
-    result = run_pipeline(file_path, verbose=verbose, df=df)
+    resolved_dataset_name = dataset_name or _default_dataset_name(file_path)
 
     db = SessionLocal()
     try:
+        baseline_profile = get_latest_profile(db, resolved_dataset_name)
+        result = run_pipeline(
+            file_path,
+            verbose=verbose,
+            df=df,
+            dataset_name=resolved_dataset_name,
+            baseline_profile=baseline_profile,
+            persist_profile_locally=False,
+        )
         store_pipeline_result(db, result, df)
     finally:
         db.close()

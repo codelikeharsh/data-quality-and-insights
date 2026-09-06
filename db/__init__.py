@@ -1,5 +1,5 @@
 from .database import engine, SessionLocal, Base, get_db
-from .models import DatasetRow, QualityRun, QualityIssue, DataLineage
+from .models import DatasetRow, QualityRun, QualityIssue, DataLineage, DatasetProfile
 
 __all__ = [
     "engine",
@@ -10,4 +10,5 @@ __all__ = [
     "QualityRun",
     "QualityIssue",
     "DataLineage",
+    "DatasetProfile",
 ]

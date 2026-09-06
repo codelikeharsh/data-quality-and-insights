@@ -12,6 +12,8 @@ parameters, never string interpolation) against user-supplied values.
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from db.models import DatasetProfile
+
 # One row per dataset: its most recent run (via ROW_NUMBER, not a slower
 # correlated subquery per dataset) plus aggregate stats across ALL of that
 # dataset's runs (via a second CTE), joined together. This is what powers
@@ -132,3 +134,20 @@ def get_dataset_issue_history(db: Session, dataset_name: str) -> list[dict]:
     on — the flat table a BI tool pivots against."""
     rows = db.execute(_DATASET_ISSUE_HISTORY_SQL, {"dataset_name": dataset_name}).mappings().all()
     return [dict(row) for row in rows]
+
+
+# The most recent profile for a dataset — the schema-drift baseline lookup.
+# Plain SQLAlchemy ORM (not raw SQL like the queries above) is the right
+# tool here: it's a single indexed lookup, not an aggregation, so the ORM
+# query builder is exactly as clear and no slower.
+def get_latest_profile(db: Session, dataset_name: str) -> dict | None:
+    """The most recently stored profile for a dataset, or None if this
+    dataset has never been ingested before (first-ever run — nothing to
+    compare against, which schema_drift_rule already treats as a no-op)."""
+    row = (
+        db.query(DatasetProfile)
+        .filter_by(dataset_name=dataset_name)
+        .order_by(DatasetProfile.created_at.desc())
+        .first()
+    )
+    return row.profile if row else None

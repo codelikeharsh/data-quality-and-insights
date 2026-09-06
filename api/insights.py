@@ -7,14 +7,13 @@ uploaded file.
 """
 from sqlalchemy.orm import Session
 
-from db.models import DatasetRow
+from db.models import DatasetProfile, DatasetRow
 from db.queries import (
     get_dataset_issue_history,
     get_dataset_run_history,
     get_dataset_summaries,
     get_issue_breakdown,
 )
-from profiling.profiler import load_profile
 
 __all__ = [
     "get_run_profile",
@@ -26,10 +25,13 @@ __all__ = [
 ]
 
 
-def get_run_profile(run_id: str) -> dict | None:
+def get_run_profile(db: Session, run_id: str) -> dict | None:
     """The per-column profile computed at ingest time for this run (dtype,
-    null rate, and numeric or text summary stats — see profiling/profiler.py)."""
-    return load_profile(run_id)
+    null rate, and numeric or text summary stats — see profiling/profiler.py).
+    Read from Postgres (db.models.DatasetProfile), not local disk — see that
+    model's docstring for why."""
+    row = db.query(DatasetProfile).filter_by(run_id=run_id).first()
+    return row.profile if row else None
 
 
 def get_run_preview(db: Session, run_id: str, limit: int = 50) -> list[dict]:

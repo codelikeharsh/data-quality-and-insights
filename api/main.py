@@ -20,9 +20,10 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import desc
 from sqlalchemy.orm import Session
 
-from config import SCHEDULER_ENABLED, SCHEDULER_INTERVAL_MINUTES, UPLOAD_DIR
+from config import ALLOWED_ORIGINS, SCHEDULER_ENABLED, SCHEDULER_INTERVAL_MINUTES, UPLOAD_DIR
 from db.database import Base, engine, get_db
 from db.models import QualityIssue, QualityRun
+from db.queries import get_latest_profile
 from db.store import store_pipeline_result
 from ingest import load_structured, load_unstructured
 from run_pipeline import run_pipeline, _default_dataset_name
@@ -87,11 +88,13 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Dev-friendly CORS: the React app runs on a different port (5173/3000).
-# In a real deployment this would be locked down to the actual frontend origin.
+# Locked to config.ALLOWED_ORIGINS (env-driven) rather than "*" — a
+# deployed environment sets ALLOWED_ORIGINS to its real frontend URL(s),
+# see .env.example. Defaults to the local Vite dev ports so local dev needs
+# no setup.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -165,7 +168,18 @@ async def ingest_file(
             df = load_structured(dest_path)
 
         resolved_dataset_name = dataset_name or _default_dataset_name(file.filename)
-        result = run_pipeline(str(dest_path), verbose=False, df=df, dataset_name=resolved_dataset_name)
+        # Baseline comes from Postgres, not local disk, so schema-drift
+        # detection is correct regardless of how many backend instances are
+        # running (see db.models.DatasetProfile / db.queries.get_latest_profile).
+        baseline_profile = get_latest_profile(db, resolved_dataset_name)
+        result = run_pipeline(
+            str(dest_path),
+            verbose=False,
+            df=df,
+            dataset_name=resolved_dataset_name,
+            baseline_profile=baseline_profile,
+            persist_profile_locally=False,
+        )
         store_pipeline_result(db, result, df)
     except HTTPException:
         raise
@@ -230,7 +244,7 @@ def run_profile(run_id: str, db: Session = Depends(get_db)):
     if run is None:
         raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
 
-    profile = get_run_profile(run_id)
+    profile = get_run_profile(db, run_id)
     if profile is None:
         raise HTTPException(status_code=404, detail=f"No stored profile for run '{run_id}'")
     return profile

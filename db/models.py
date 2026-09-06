@@ -1,17 +1,22 @@
 """
-SQLAlchemy ORM models for the four core tables.
+SQLAlchemy ORM models for the five core tables.
 
-  dataset_rows    - the ingested data, one row per source row, stored as
-                    JSON so the schema doesn't need to be known in advance
-                    (this table works for any tabular dataset, not just one
-                    fixed column layout)
-  quality_runs    - one row per ingestion run, with its health score
-  quality_issues  - every flagged issue for a run, queryable later
-  data_lineage    - source -> transformations -> destination, per file
+  dataset_rows      - the ingested data, one row per source row, stored as
+                      JSON so the schema doesn't need to be known in advance
+                      (this table works for any tabular dataset, not just
+                      one fixed column layout)
+  quality_runs      - one row per ingestion run, with its health score
+  quality_issues    - every flagged issue for a run, queryable later
+  data_lineage      - source -> transformations -> destination, per file
+  dataset_profiles  - the per-column profile computed for each run, keyed
+                      by dataset so the NEXT run of the SAME dataset has a
+                      schema-drift baseline that works across multiple
+                      backend instances (see db/queries.py::get_latest_profile)
+                      rather than each instance's own local disk
 
-quality_runs.run_id is the thread tying all four tables together: it's what
-makes a row, an issue, and a lineage record traceable back to exactly the
-ingestion run that produced them.
+quality_runs.run_id is the thread tying every table together: it's what
+makes a row, an issue, a lineage record, and a profile traceable back to
+exactly the ingestion run that produced them.
 """
 from datetime import datetime, timezone
 
@@ -105,4 +110,23 @@ class DataLineage(Base):
     # An explicit relationship (not just the raw FK column) is what lets
     # SQLAlchemy's unit-of-work correctly order this insert AFTER its
     # parent quality_runs row within the same flush/commit.
+    run = relationship("QualityRun")
+
+
+class DatasetProfile(Base):
+    """The per-column profile (see profiling/profiler.py::profile_dataframe)
+    computed for one run, persisted so schema_drift_rule's baseline lookup
+    works from Postgres — shared across every backend instance — instead of
+    each instance's own local disk (the flat-file version, still used by
+    the DB-free CLI path, breaks the moment you run more than one API
+    instance: each would have its own idea of "the latest profile")."""
+
+    __tablename__ = "dataset_profiles"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    run_id = Column(String(16), ForeignKey("quality_runs.run_id"), nullable=False, index=True)
+    dataset_name = Column(String(255), nullable=False, index=True)
+    profile = Column(JSON, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
     run = relationship("QualityRun")

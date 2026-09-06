@@ -13,7 +13,7 @@ import math
 import pandas as pd
 from sqlalchemy.orm import Session
 
-from db.models import DatasetRow, QualityRun, QualityIssue, DataLineage
+from db.models import DatasetRow, QualityRun, QualityIssue, DataLineage, DatasetProfile
 
 
 def store_pipeline_result(db: Session, result: dict, df: pd.DataFrame) -> QualityRun:
@@ -25,15 +25,29 @@ def store_pipeline_result(db: Session, result: dict, df: pd.DataFrame) -> Qualit
     a partially-stored run (e.g. rows but no matching quality_run) would
     corrupt the lineage this table exists to provide.
     """
+    dataset_name = result.get("dataset_name", "default")
+
     run = QualityRun(
         run_id=result["run_id"],
-        dataset_name=result.get("dataset_name", "default"),
+        dataset_name=dataset_name,
         source_file=result["source_file"],
         health_score=result["health_score"]["score"],
         rows_processed=result["rows_processed"],
         rows_flagged=result["rows_flagged"],
     )
     db.add(run)
+
+    # Stored so the NEXT run of this dataset's schema-drift baseline comes
+    # from Postgres (shared across every backend instance) rather than this
+    # process's own local disk — see db.models.DatasetProfile's docstring.
+    if "profile" in result:
+        db.add(
+            DatasetProfile(
+                run_id=result["run_id"],
+                dataset_name=dataset_name,
+                profile=result["profile"],
+            )
+        )
 
     for idx, row in df.iterrows():
         db.add(
