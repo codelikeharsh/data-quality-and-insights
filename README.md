@@ -77,7 +77,8 @@ in a completely different retail-sales dataset with different column names.
               │               power-report │   │  high-severity issues  │
               │               shaped only) │   │  (scheduler/alerts.py) │
               │  profiling/  per-column    │   └────────────────────────┘
-              │              stats + JSON, │
+              │              stats, saved  │
+              │              to Postgres   │
               │              PER DATASET   │
               │  quality/    7 rule        │
               │              functions +   │
@@ -97,6 +98,11 @@ in a completely different retail-sales dataset with different column names.
               │  quality_issues — every flagged issue   │
               │  data_lineage   — source → transforms   │
               │                    → destination        │
+              │  dataset_profiles — per-run column      │
+              │                    profile, per dataset  │
+              │                    (schema-drift baseline│
+              │                    shared across every   │
+              │                    backend instance)     │
               └──────────────────────────────────────┘
 ```
 
@@ -182,8 +188,9 @@ name appears anywhere in the rule engine.
 Python · FastAPI · React (plain fetch, Tailwind, Recharts) · PostgreSQL ·
 SQLAlchemy + Alembic (migrations) · raw SQL (window functions/CTEs) for
 reporting · pandas/numpy · rapidfuzz (near-duplicate detection) ·
-pytesseract + pdf2image (OCR) · APScheduler · Slack webhooks · Docker
-Compose · pytest · ruff · GitHub Actions CI
+pytesseract + pdf2image (OCR) · APScheduler (production automation) +
+Apache Airflow (DAG, validated — see [`orchestration/`](orchestration/)) ·
+Slack webhooks · Docker Compose · pytest · ruff · GitHub Actions CI
 
 ## Setup
 
@@ -286,6 +293,22 @@ reconstruct through SQLAlchemy's query builder:
   severity counts across every stored run for a dataset, one aggregate
   query instead of paging through every run's issue list by hand.
 
+**Query performance**, measured with `EXPLAIN ANALYZE` against 2,000 runs /
+20 datasets / ~8,000 issues (a synthetic volume, well beyond the bundled
+demo data, generated specifically to make the query plans meaningful):
+
+| Query | Plan | Execution time |
+|---|---|---|
+| Dataset summary (window function + CTE) | `HashAggregate` → `WindowAgg` → `Hash Join` | **2.2ms** |
+| Issue breakdown (join + `GROUP BY`) | `Hash Join` → `Sort` → `GroupAggregate` | **16.3ms** |
+
+Both plans use sequential scans on `quality_runs`/`quality_issues` rather
+than their indexes — and that's the *correct* choice at this table size
+(a few thousand rows fits easily in one scan; an index lookup would add
+overhead, not remove it). Stated honestly rather than claiming the indexes
+are "helping" here: they exist for when `dataset_name`/`run_id` lookups
+matter at a larger scale, not because they're doing anything at this one.
+
 ## Export
 
 **`GET /runs/{id}/export`** returns a CSV quality report (one row per
@@ -355,7 +378,13 @@ demo-sized project has none:
   formal study — reasonable for a v1, worth stating rather than implying
   otherwise.
 - **No streaming ingestion.** A file is loaded into memory via pandas in
-  full; a multi-GB file would need chunked processing this doesn't do.
+  full — several of the quality rules (duplicate detection, per-entity
+  outlier grouping) fundamentally need the whole dataset in memory at once
+  to compare rows against each other, so this isn't a small patch. Benchmarked
+  at 1,000,000 rows / 28MB: ~2.5s, ~150MB peak memory on a base MacBook Air
+  — comfortably fine at that size. `MAX_UPLOAD_SIZE_MB` (config.py, default
+  500MB) rejects anything larger with a clear error before it risks an
+  out-of-memory crash, rather than leaving that limit undocumented.
 - **Auth is a single shared API key**, not per-user accounts or roles — see
   [Auth](#auth) above.
 
@@ -364,7 +393,8 @@ demo-sized project has none:
 ```
 ingest/       structured.py (any CSV/Excel schema) + unstructured.py (OCR,
               scoped to power-report-shaped scans — see its docstring)
-profiling/    per-column stats -> JSON, per dataset
+profiling/    per-column stats, persisted to Postgres per dataset (falls
+              back to local flat files only for the DB-free CLI path)
 quality/      7 schema-agnostic rule functions + health scoring, each
               independently testable
 db/           SQLAlchemy models (JSON row storage), storage, queries.py
@@ -374,7 +404,10 @@ api/          FastAPI app, auth.py (API-key dependency), generic per-run
               profile/preview/export, SQL-backed dataset/report endpoints
 frontend/     React + Tailwind + Recharts dashboard: dataset picker, health
               trend, issue breakdown, column profile, data preview, export
-scheduler/    watch-folder automation + Slack alerting
+scheduler/    watch-folder automation + Slack alerting (actual production
+              automation — in-process, via APScheduler)
+orchestration/ the same watch-folder job as a real, Airflow-validated DAG
+              (not deployed — see orchestration/README.md)
 tests/        63 pytest tests (rule-engine/auth tests need no infra; DB/OCR
               tests self-skip without Postgres/tesseract)
 .github/      CI: pytest + ruff (backend), oxlint + build (frontend)

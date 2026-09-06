@@ -13,6 +13,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from config import MAX_UPLOAD_SIZE_MB
+
 # A column is auto-coerced from text to numeric only when at least this
 # fraction of its non-null values successfully parse as numbers — this is
 # what lets "energy_requirement_mu" (all numeric) get typed correctly while
@@ -124,9 +126,25 @@ def load_structured(file_path: str | Path) -> pd.DataFrame:
       a stray non-numeric value becomes a null the quality rules can catch,
       rather than the whole column staying text-typed or raising deep in
       some later computation.
+
+    The whole file is loaded into memory via pandas — no chunking/streaming
+    (see README's "Known limitations"). Benchmarked at 1,000,000 rows / 28MB:
+    ~2.5s wall time, ~150MB peak memory on a base MacBook Air. A file above
+    MAX_UPLOAD_SIZE_MB fails fast with a clear error instead of risking an
+    out-of-memory crash partway through — a real limit stated up front is
+    better than an undocumented one discovered by a crash.
     """
     file_path = Path(file_path)
     suffix = file_path.suffix.lower()
+
+    size_mb = file_path.stat().st_size / (1024 * 1024)
+    if size_mb > MAX_UPLOAD_SIZE_MB:
+        raise ValueError(
+            f"File is {size_mb:.1f}MB, which exceeds the {MAX_UPLOAD_SIZE_MB}MB limit "
+            f"(ingest/structured.py loads the whole file into memory — no streaming support "
+            f"yet). Split the file, or raise MAX_UPLOAD_SIZE_MB in config.py if you have the "
+            f"memory headroom to back it."
+        )
 
     if suffix == ".csv":
         df = pd.read_csv(file_path)

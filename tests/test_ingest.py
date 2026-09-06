@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from ingest import load_structured
 
 SAMPLE = Path(__file__).resolve().parent.parent / "data" / "samples" / "sample_power_data.csv"
@@ -45,3 +47,17 @@ def test_load_structured_accepts_arbitrary_schema(tmp_path):
     assert df["units_sold"].dtype.kind == "f"
     assert df["revenue_usd"].dtype.kind == "f"
     assert df.loc[0, "store_name"] == "Downtown"
+
+
+def test_load_structured_rejects_oversized_file(tmp_path, monkeypatch):
+    """A file over the configured size limit fails fast with a clear error
+    instead of risking an out-of-memory crash partway through loading it —
+    see ingest/structured.py::load_structured's docstring."""
+    import ingest.structured as structured_module
+
+    monkeypatch.setattr(structured_module, "MAX_UPLOAD_SIZE_MB", 0.0001)  # ~100 bytes
+    csv_path = tmp_path / "too_big.csv"
+    csv_path.write_text("a,b,c\n" + "1,2,3\n" * 100)
+
+    with pytest.raises(ValueError, match="exceeds"):
+        load_structured(csv_path)
