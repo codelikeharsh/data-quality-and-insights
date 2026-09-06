@@ -8,7 +8,12 @@ uploaded file.
 from sqlalchemy.orm import Session
 
 from db.models import DatasetRow
-from db.queries import get_dataset_summaries, get_issue_breakdown
+from db.queries import (
+    get_dataset_issue_history,
+    get_dataset_run_history,
+    get_dataset_summaries,
+    get_issue_breakdown,
+)
 from profiling.profiler import load_profile
 
 __all__ = [
@@ -16,6 +21,8 @@ __all__ = [
     "get_run_preview",
     "get_dataset_summaries",
     "get_issue_breakdown",
+    "get_dataset_run_history",
+    "get_dataset_issue_history",
 ]
 
 

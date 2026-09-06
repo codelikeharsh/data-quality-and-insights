@@ -185,3 +185,26 @@ def test_export_run_report_returns_csv(client):
     body = response.text
     assert "issue_type" in body.splitlines()[0]  # header row
     assert result["run_id"] in body
+
+
+def test_export_dataset_run_history_returns_csv(client):
+    result = _ingest_sample(client)
+    response = client.get(f"/datasets/{result['dataset_name']}/export/runs")
+    assert response.status_code == 200
+    body = response.text
+    assert body.splitlines()[0] == "run_id,timestamp,health_score,rows_processed,rows_flagged"
+    assert result["run_id"] in body
+
+
+def test_export_dataset_run_history_404_for_unknown_dataset(client):
+    response = client.get("/datasets/doesnotexist/export/runs")
+    assert response.status_code == 404
+
+
+def test_export_dataset_issue_history_returns_csv(client):
+    result = _ingest_sample(client)
+    response = client.get(f"/datasets/{result['dataset_name']}/export/issues")
+    assert response.status_code == 200
+    body = response.text
+    assert "issue_type" in body.splitlines()[0]
+    assert result["run_id"] in body

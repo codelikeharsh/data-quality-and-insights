@@ -88,3 +88,47 @@ def get_issue_breakdown(db: Session, dataset_name: str | None = None) -> list[di
     scoped to one dataset."""
     rows = db.execute(_ISSUE_BREAKDOWN_SQL, {"dataset_name": dataset_name}).mappings().all()
     return [dict(row) for row in rows]
+
+
+# Every run for one dataset, chronological — the shape a BI tool wants for
+# a health-score-over-time line chart (one fact table, not the dashboard's
+# already-aggregated JSON).
+_DATASET_RUN_HISTORY_SQL = text(
+    """
+    SELECT run_id, timestamp, health_score, rows_processed, rows_flagged
+    FROM quality_runs
+    WHERE dataset_name = :dataset_name
+    ORDER BY timestamp
+    """
+)
+
+# Every issue from every run of one dataset, with the run's own metadata
+# joined onto each row — a flat, denormalized table that's exactly what a
+# BI tool wants to pivot/filter by run, date, severity, or issue type
+# without a second query. Deliberately NOT limited to the latest run (that's
+# what GET /runs/{id}/export is for) — this is the full history.
+_DATASET_ISSUE_HISTORY_SQL = text(
+    """
+    SELECT
+        qr.run_id, qr.timestamp AS run_timestamp, qr.health_score,
+        qi.severity, qi.issue_type, qi.row_reference, qi."column", qi.description
+    FROM quality_issues qi
+    JOIN quality_runs qr ON qr.run_id = qi.run_id
+    WHERE qr.dataset_name = :dataset_name
+    ORDER BY qr.timestamp, qi.id
+    """
+)
+
+
+def get_dataset_run_history(db: Session, dataset_name: str) -> list[dict]:
+    """Every run of one dataset, chronological — for a health-score trend
+    chart built in an external BI tool rather than the dashboard's own."""
+    rows = db.execute(_DATASET_RUN_HISTORY_SQL, {"dataset_name": dataset_name}).mappings().all()
+    return [dict(row) for row in rows]
+
+
+def get_dataset_issue_history(db: Session, dataset_name: str) -> list[dict]:
+    """Every issue from every run of one dataset, with run metadata joined
+    on — the flat table a BI tool pivots against."""
+    rows = db.execute(_DATASET_ISSUE_HISTORY_SQL, {"dataset_name": dataset_name}).mappings().all()
+    return [dict(row) for row in rows]

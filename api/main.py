@@ -29,6 +29,8 @@ from run_pipeline import run_pipeline, _default_dataset_name
 from scheduler.watcher import process_watch_folder
 from api.auth import require_api_key
 from api.insights import (
+    get_dataset_issue_history,
+    get_dataset_run_history,
     get_dataset_summaries,
     get_issue_breakdown,
     get_run_preview,
@@ -289,3 +291,43 @@ def export_run_report(run_id: str, db: Session = Depends(get_db)):
         media_type="text/csv",
         headers={"Content-Disposition": f'attachment; filename="{run.dataset_name}_{run_id}_report.csv"'},
     )
+
+
+def _rows_to_csv_response(rows: list[dict], filename: str) -> StreamingResponse:
+    """dict rows (from db/queries.py, already ordered) -> a downloadable CSV
+    response. Column headers come from the first row's keys, so the caller's
+    SQL SELECT list is the only place the CSV's shape is defined."""
+    buffer = io.StringIO()
+    if rows:
+        writer = csv.DictWriter(buffer, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
+    buffer.seek(0)
+    return StreamingResponse(
+        buffer,
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.get("/datasets/{dataset_name}/export/runs")
+def export_dataset_run_history(dataset_name: str, db: Session = Depends(get_db)):
+    """Every run of one dataset, chronological, as CSV — the fact table a
+    BI tool (Power BI, Tableau, Excel) plots as a health-score-over-time
+    trend, built there instead of re-deriving the dashboard's own chart."""
+    rows = get_dataset_run_history(db, dataset_name)
+    if not rows:
+        raise HTTPException(status_code=404, detail=f"No runs found for dataset '{dataset_name}'")
+    return _rows_to_csv_response(rows, f"{dataset_name}_run_history.csv")
+
+
+@app.get("/datasets/{dataset_name}/export/issues")
+def export_dataset_issue_history(dataset_name: str, db: Session = Depends(get_db)):
+    """Every issue from every run of one dataset, as one flat CSV (run
+    metadata joined onto each issue row) — the table a BI tool pivots by
+    run/date/severity/issue type. Unlike GET /runs/{id}/export, this is the
+    FULL history, not just the latest run."""
+    rows = get_dataset_issue_history(db, dataset_name)
+    if not rows:
+        raise HTTPException(status_code=404, detail=f"No issues found for dataset '{dataset_name}'")
+    return _rows_to_csv_response(rows, f"{dataset_name}_issue_history.csv")
