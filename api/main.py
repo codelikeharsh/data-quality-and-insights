@@ -6,6 +6,8 @@ for the React dashboard.
 Run locally with:
     uvicorn api.main:app --reload
 """
+import csv
+import io
 import shutil
 import uuid
 from contextlib import asynccontextmanager
@@ -14,6 +16,7 @@ from pathlib import Path
 from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi import Depends, FastAPI, Form, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from sqlalchemy import desc
 from sqlalchemy.orm import Session
 
@@ -22,11 +25,19 @@ from db.database import Base, engine, get_db
 from db.models import QualityIssue, QualityRun
 from db.store import store_pipeline_result
 from ingest import load_structured, load_unstructured
-from run_pipeline import run_pipeline
+from run_pipeline import run_pipeline, _default_dataset_name
 from scheduler.watcher import process_watch_folder
-from api.insights import get_run_preview, get_run_profile
+from api.auth import require_api_key
+from api.insights import (
+    get_dataset_summaries,
+    get_issue_breakdown,
+    get_run_preview,
+    get_run_profile,
+)
 from api.schemas import (
+    DatasetSummaryOut,
     IngestResponse,
+    IssueBreakdownOut,
     IssueOut,
     RunProfileOut,
     RunSummaryOut,
@@ -39,9 +50,13 @@ _background_scheduler: BackgroundScheduler | None = None
 async def lifespan(app: FastAPI):
     global _background_scheduler
 
-    # Idempotent: safe to call even if the tables already exist. Keeps the
-    # API self-contained for local/demo use without a separate migration
-    # step, while db/init_db.py remains available for explicit use.
+    # Schema is Alembic-managed (see migrations/) — the Docker image runs
+    # `alembic upgrade head` before this process starts (see Dockerfile.api),
+    # and `alembic upgrade head` is the documented step for running the API
+    # locally too (see README). This create_all is ONLY a safety net for
+    # someone running the API directly against a completely fresh DB without
+    # having run migrations first — it's a no-op once the schema exists,
+    # and does not replace running migrations for anything beyond that.
     Base.metadata.create_all(bind=engine)
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -89,11 +104,21 @@ STRUCTURED_EXTENSIONS = (".csv", ".xlsx", ".xls")
 UNSTRUCTURED_EXTENSIONS = (".pdf", ".png", ".jpg", ".jpeg", ".tiff")
 
 
-@app.post("/ingest", response_model=IngestResponse)
+@app.post("/ingest", response_model=IngestResponse, dependencies=[Depends(require_api_key)])
 async def ingest_file(
     file: UploadFile = File(...),
     month: str | None = Form(
         None, description="Required for scanned PDF/image uploads (e.g. '2026-04') — OCR can't read a month out of a table row."
+    ),
+    dataset_name: str | None = Form(
+        None,
+        description=(
+            "Groups this run with other runs of the same logical dataset "
+            "(see db.models.QualityRun.dataset_name). Defaults to the "
+            "uploaded filename's stem — set this explicitly when successive "
+            "uploads won't share a filename (e.g. 'power_supply_2026-04.csv' "
+            "vs '...2026-05.csv') but should still be tracked as one series."
+        ),
     ),
     db: Session = Depends(get_db),
 ):
@@ -102,6 +127,7 @@ async def ingest_file(
     ingest.load_structured; scanned PDFs/images go through OCR via
     ingest.load_unstructured — both land in the same DataFrame shape, so
     everything downstream (profiling, quality rules, storage) is source-agnostic.
+    Requires an X-API-Key header if config.API_KEY is set (see api/auth.py).
     """
     suffix = Path(file.filename).suffix.lower()
     if suffix not in STRUCTURED_EXTENSIONS + UNSTRUCTURED_EXTENSIONS:
@@ -136,7 +162,8 @@ async def ingest_file(
         else:
             df = load_structured(dest_path)
 
-        result = run_pipeline(str(dest_path), verbose=False, df=df)
+        resolved_dataset_name = dataset_name or _default_dataset_name(file.filename)
+        result = run_pipeline(str(dest_path), verbose=False, df=df, dataset_name=resolved_dataset_name)
         store_pipeline_result(db, result, df)
     except HTTPException:
         raise
@@ -147,9 +174,30 @@ async def ingest_file(
 
 
 @app.get("/runs", response_model=list[RunSummaryOut])
-def list_runs(db: Session = Depends(get_db)):
-    """Past ingestion runs, most recent first — powers the health-score trend chart."""
-    return db.query(QualityRun).order_by(desc(QualityRun.timestamp)).all()
+def list_runs(dataset_name: str | None = None, limit: int = 200, db: Session = Depends(get_db)):
+    """Past ingestion runs, most recent first — powers the health-score trend
+    chart. Pass `dataset_name` to scope this to one dataset's history; the
+    dashboard always should, since mixing two unrelated datasets' scores
+    onto one trend line is meaningless (see db.models.QualityRun.dataset_name)."""
+    query = db.query(QualityRun)
+    if dataset_name is not None:
+        query = query.filter_by(dataset_name=dataset_name)
+    return query.order_by(desc(QualityRun.timestamp)).limit(limit).all()
+
+
+@app.get("/datasets", response_model=list[DatasetSummaryOut])
+def list_datasets(db: Session = Depends(get_db)):
+    """Every distinct dataset ingested so far, with its latest run and
+    aggregate health-score stats — see db/queries.py for the SQL. This is
+    what the dashboard's dataset picker is built from."""
+    return get_dataset_summaries(db)
+
+
+@app.get("/reports/issue-breakdown", response_model=list[IssueBreakdownOut])
+def issue_breakdown(dataset_name: str | None = None, db: Session = Depends(get_db)):
+    """Issue-type x severity counts across every stored run, optionally
+    scoped to one dataset — "what kinds of problems show up most."""
+    return get_issue_breakdown(db, dataset_name=dataset_name)
 
 
 @app.get("/runs/{run_id}/issues", response_model=list[IssueOut])
@@ -195,3 +243,49 @@ def run_preview(run_id: str, limit: int = 50, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
 
     return get_run_preview(db, run_id, limit=limit)
+
+
+@app.get("/runs/{run_id}/export")
+def export_run_report(run_id: str, db: Session = Depends(get_db)):
+    """A CSV quality report for one run (one row per flagged issue, with the
+    run's dataset/score/timestamp repeated on every row) — meant for
+    handing to a spreadsheet or BI tool (Excel, Power BI, Tableau) rather
+    than the dashboard itself, which already renders this data directly."""
+    run = db.query(QualityRun).filter_by(run_id=run_id).first()
+    if run is None:
+        raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found")
+
+    issues = db.query(QualityIssue).filter_by(run_id=run_id).all()
+
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(
+        [
+            "dataset_name", "run_id", "run_timestamp", "health_score",
+            "rows_processed", "rows_flagged", "severity", "issue_type",
+            "row_reference", "column", "description",
+        ]
+    )
+    if issues:
+        for issue in issues:
+            writer.writerow(
+                [
+                    run.dataset_name, run.run_id, run.timestamp.isoformat(), run.health_score,
+                    run.rows_processed, run.rows_flagged, issue.severity, issue.issue_type,
+                    issue.row_reference, issue.column, issue.description,
+                ]
+            )
+    else:
+        writer.writerow(
+            [
+                run.dataset_name, run.run_id, run.timestamp.isoformat(), run.health_score,
+                run.rows_processed, run.rows_flagged, "", "", "", "", "no issues flagged",
+            ]
+        )
+
+    buffer.seek(0)
+    return StreamingResponse(
+        buffer,
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{run.dataset_name}_{run_id}_report.csv"'},
+    )

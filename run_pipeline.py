@@ -19,21 +19,39 @@ from profiling import profile_dataframe, save_profile, load_profile
 from quality import run_all_rules, compute_health_score
 
 
-def run_pipeline(file_path: str, verbose: bool = True, df=None) -> dict:
+def _default_dataset_name(file_path: str) -> str:
+    """The stable identity a batch of runs belongs to, e.g. "sample_power_data"
+    for data/samples/sample_power_data.csv. Strips a leading 8-hex-char
+    upload-dedup prefix (see api/main.py's f"{uuid4().hex[:8]}_{filename}")
+    so two uploads of the same logical file group together instead of each
+    getting its own dataset."""
+    stem = Path(file_path).stem
+    if len(stem) > 9 and stem[8] == "_" and all(c in "0123456789abcdef" for c in stem[:8]):
+        stem = stem[9:]
+    return stem or "default"
+
+
+def run_pipeline(file_path: str, verbose: bool = True, df=None, dataset_name: str | None = None) -> dict:
     """Run ingest -> profile -> quality checks -> health score.
 
     `df` lets a caller that already loaded the file (e.g.
     run_pipeline_and_store, or the future /ingest endpoint) pass it in
     directly instead of having this function re-read the file from disk.
+    `dataset_name` groups this run with other runs of the same logical
+    dataset (see db.models.QualityRun.dataset_name) — defaults to the
+    source filename's stem.
     """
     run_id = str(uuid.uuid4())[:8]
+    dataset_name = dataset_name or _default_dataset_name(file_path)
 
     # 1. Ingest
     if df is None:
         df = load_structured(file_path)
 
-    # 2. Profile (and load the prior run's profile as a schema-drift baseline)
-    baseline_profile = load_profile("latest")
+    # 2. Profile (and load the prior run's profile, FOR THIS DATASET, as a
+    # schema-drift baseline — a different dataset's profile is not a valid
+    # baseline, see profiling.profiler.save_profile's docstring)
+    baseline_profile = load_profile("latest", dataset_name=dataset_name)
     profile = profile_dataframe(df)
 
     # 3. Quality checks. No column names are assumed — guess_entity_column /
@@ -51,11 +69,13 @@ def run_pipeline(file_path: str, verbose: bool = True, df=None) -> dict:
     # 4. Health score
     score_result = compute_health_score(issues)
 
-    # Persist this run's profile so the *next* run has a schema-drift baseline.
-    save_profile(profile, run_id)
+    # Persist this run's profile so the *next* run of THIS dataset has a
+    # schema-drift baseline.
+    save_profile(profile, run_id, dataset_name=dataset_name)
 
     result = {
         "run_id": run_id,
+        "dataset_name": dataset_name,
         "source_file": str(file_path),
         "rows_processed": len(df),
         "rows_flagged": len({i.row_reference for i in issues}),
@@ -72,7 +92,7 @@ def run_pipeline(file_path: str, verbose: bool = True, df=None) -> dict:
 
 def _print_report(result: dict) -> None:
     print(f"\n{'=' * 60}")
-    print(f"  DATA QUALITY RUN: {result['run_id']}")
+    print(f"  DATA QUALITY RUN: {result['run_id']}  (dataset: {result['dataset_name']})")
     print(f"{'=' * 60}")
     print(f"Source file:     {result['source_file']}")
     print(f"Rows processed:  {result['rows_processed']}")

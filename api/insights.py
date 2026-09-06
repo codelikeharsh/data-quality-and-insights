@@ -8,7 +8,15 @@ uploaded file.
 from sqlalchemy.orm import Session
 
 from db.models import DatasetRow
+from db.queries import get_dataset_summaries, get_issue_breakdown
 from profiling.profiler import load_profile
+
+__all__ = [
+    "get_run_profile",
+    "get_run_preview",
+    "get_dataset_summaries",
+    "get_issue_breakdown",
+]
 
 
 def get_run_profile(run_id: str) -> dict | None:

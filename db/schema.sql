@@ -6,11 +6,13 @@
 CREATE TABLE IF NOT EXISTS quality_runs (
     run_id          VARCHAR(16) PRIMARY KEY,
     timestamp       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    dataset_name    VARCHAR(255) NOT NULL DEFAULT 'default',
     source_file     VARCHAR(512) NOT NULL,
     health_score    INTEGER NOT NULL,
     rows_processed  INTEGER NOT NULL,
     rows_flagged    INTEGER NOT NULL
 );
+CREATE INDEX IF NOT EXISTS ix_quality_runs_dataset_name ON quality_runs(dataset_name);
 
 -- One row per ingested source row, stored as JSON rather than fixed
 -- columns — this is what lets the same table hold any dataset's shape

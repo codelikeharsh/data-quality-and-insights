@@ -27,6 +27,7 @@ def store_pipeline_result(db: Session, result: dict, df: pd.DataFrame) -> Qualit
     """
     run = QualityRun(
         run_id=result["run_id"],
+        dataset_name=result.get("dataset_name", "default"),
         source_file=result["source_file"],
         health_score=result["health_score"]["score"],
         rows_processed=result["rows_processed"],

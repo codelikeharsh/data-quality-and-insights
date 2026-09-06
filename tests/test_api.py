@@ -116,3 +116,72 @@ def test_run_preview_returns_raw_rows(client):
     rows = response.json()
     assert len(rows) == 5
     assert "state_name" in rows[0]
+
+
+def test_ingest_defaults_dataset_name_to_filename(client):
+    result = _ingest_sample(client)
+    assert result["dataset_name"] == "sample_power_data"
+
+
+def test_ingest_accepts_explicit_dataset_name(client):
+    with SAMPLE.open("rb") as f:
+        response = client.post(
+            "/ingest",
+            files={"file": ("sample_power_data.csv", f, "text/csv")},
+            data={"dataset_name": "power_supply_series"},
+        )
+    assert response.status_code == 200
+    assert response.json()["dataset_name"] == "power_supply_series"
+
+
+def test_runs_filter_scopes_to_one_dataset(client):
+    """Two uploads under different dataset names must not mix in /runs —
+    this is the exact bug a health-score trend chart would otherwise hit
+    (see db.models.QualityRun.dataset_name)."""
+    with SAMPLE.open("rb") as f:
+        client.post(
+            "/ingest",
+            files={"file": ("sample_power_data.csv", f, "text/csv")},
+            data={"dataset_name": "dataset_a"},
+        )
+    with SAMPLE.open("rb") as f:
+        client.post(
+            "/ingest",
+            files={"file": ("sample_power_data.csv", f, "text/csv")},
+            data={"dataset_name": "dataset_b"},
+        )
+
+    response = client.get("/runs", params={"dataset_name": "dataset_a"})
+    assert response.status_code == 200
+    runs = response.json()
+    assert len(runs) == 1
+    assert all(r["dataset_name"] == "dataset_a" for r in runs)
+
+
+def test_datasets_endpoint_lists_distinct_datasets(client):
+    _ingest_sample(client)  # dataset_name defaults to "sample_power_data"
+    response = client.get("/datasets")
+    assert response.status_code == 200
+    datasets = {d["dataset_name"] for d in response.json()}
+    assert "sample_power_data" in datasets
+
+
+def test_issue_breakdown_scoped_to_dataset(client):
+    result = _ingest_sample(client)
+    response = client.get(
+        "/reports/issue-breakdown", params={"dataset_name": result["dataset_name"]}
+    )
+    assert response.status_code == 200
+    breakdown = response.json()
+    assert len(breakdown) > 0
+    assert all("issue_type" in row and "issue_count" in row for row in breakdown)
+
+
+def test_export_run_report_returns_csv(client):
+    result = _ingest_sample(client)
+    response = client.get(f"/runs/{result['run_id']}/export")
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/csv")
+    body = response.text
+    assert "issue_type" in body.splitlines()[0]  # header row
+    assert result["run_id"] in body

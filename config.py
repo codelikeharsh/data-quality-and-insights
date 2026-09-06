@@ -18,6 +18,13 @@ DATABASE_URL = os.getenv(
     "postgresql+psycopg2://dqe:dqe@localhost:5433/dqe",
 )
 
+# --- Auth ---------------------------------------------------------------
+# Shared-secret key required (via the X-API-Key header) to hit write
+# endpoints — see api/auth.py. Unset by default so a fresh local clone
+# still works with zero setup; set it in .env for anything other than
+# solo local use.
+API_KEY = os.getenv("API_KEY", "")
+
 # --- Alerting ---------------------------------------------------------------
 SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL", "")
 ALERT_HEALTH_SCORE_THRESHOLD = float(os.getenv("ALERT_HEALTH_SCORE_THRESHOLD", "70"))

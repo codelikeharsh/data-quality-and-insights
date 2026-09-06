@@ -65,21 +65,42 @@ def profile_dataframe(df: pd.DataFrame) -> dict:
     }
 
 
-def save_profile(profile: dict, run_id: str, profile_dir: Path = PROFILE_DIR) -> Path:
-    """Persist a profile as JSON, keyed by run_id, so the schema-drift rule
-    can load the most recent prior profile as a baseline."""
+def _safe_dataset_key(dataset_name: str) -> str:
+    """Filesystem-safe stand-in for a dataset name, used only for the
+    per-dataset "latest" pointer file — collisions here just mean two very
+    similarly-named datasets share a schema-drift baseline, not data loss."""
+    return "".join(c if c.isalnum() or c in "-_" else "_" for c in dataset_name) or "default"
+
+
+def save_profile(
+    profile: dict, run_id: str, dataset_name: str = "default", profile_dir: Path = PROFILE_DIR
+) -> Path:
+    """Persist a profile as JSON, keyed by run_id, and update that
+    dataset's "latest" pointer so the NEXT run of the SAME dataset (not
+    just any dataset) has an accurate schema-drift baseline. Without the
+    per-dataset pointer, ingesting dataset B right after dataset A would
+    make schema_drift_rule compare B's columns against A's — a false
+    positive on every column, not a real schema change.
+    """
     profile_dir.mkdir(parents=True, exist_ok=True)
     out_path = profile_dir / f"{run_id}.json"
     out_path.write_text(json.dumps(profile, indent=2))
 
-    latest_path = profile_dir / "latest.json"
+    latest_path = profile_dir / f"latest__{_safe_dataset_key(dataset_name)}.json"
     latest_path.write_text(json.dumps(profile, indent=2))
 
     return out_path
 
 
-def load_profile(run_id: str = "latest", profile_dir: Path = PROFILE_DIR) -> dict | None:
-    path = profile_dir / f"{run_id}.json"
+def load_profile(
+    run_id: str = "latest", dataset_name: str = "default", profile_dir: Path = PROFILE_DIR
+) -> dict | None:
+    """Load a stored profile by run_id, or the given dataset's most recent
+    profile when run_id == "latest" (the default)."""
+    if run_id == "latest":
+        path = profile_dir / f"latest__{_safe_dataset_key(dataset_name)}.json"
+    else:
+        path = profile_dir / f"{run_id}.json"
     if not path.exists():
         return None
     return json.loads(path.read_text())

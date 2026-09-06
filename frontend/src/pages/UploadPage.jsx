@@ -8,20 +8,24 @@ export default function UploadPage() {
   const [isUploading, setIsUploading] = useState(false)
   const [error, setError] = useState(null)
   const [result, setResult] = useState(null)
+  const [datasetName, setDatasetName] = useState('')
 
-  const runIngest = useCallback(async (file) => {
-    if (!file) return
-    setIsUploading(true)
-    setError(null)
-    try {
-      const data = await ingestFile(file)
-      setResult(data)
-    } catch (err) {
-      setError(err.message)
-    } finally {
-      setIsUploading(false)
-    }
-  }, [])
+  const runIngest = useCallback(
+    async (file) => {
+      if (!file) return
+      setIsUploading(true)
+      setError(null)
+      try {
+        const data = await ingestFile(file, datasetName.trim() || undefined)
+        setResult(data)
+      } catch (err) {
+        setError(err.message)
+      } finally {
+        setIsUploading(false)
+      }
+    },
+    [datasetName],
+  )
 
   const handleDrop = (event) => {
     event.preventDefault()
@@ -37,6 +41,19 @@ export default function UploadPage() {
         Drop any CSV/Excel file — no fixed schema required. It runs through ingestion, profiling,
         the quality rule engine, and health scoring, and the result appears below immediately.
       </p>
+
+      <div className="mt-6 max-w-sm">
+        <label className="block text-xs font-medium text-slate-500">
+          Dataset name <span className="font-normal text-slate-400">(optional — groups repeated uploads of the same feed)</span>
+        </label>
+        <input
+          type="text"
+          value={datasetName}
+          onChange={(e) => setDatasetName(e.target.value)}
+          placeholder="defaults to the filename"
+          className="mt-1 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm text-slate-900"
+        />
+      </div>
 
       <label
         onDragOver={(e) => {
@@ -82,7 +99,7 @@ export default function UploadPage() {
           <div className="flex items-center justify-between rounded-lg border border-slate-200 bg-white p-5">
             <div>
               <p className="text-xs font-medium uppercase tracking-wide text-slate-500">
-                Run {result.run_id}
+                Run {result.run_id} · dataset "{result.dataset_name}"
               </p>
               <p className="mt-1 text-sm text-slate-600">
                 {result.rows_processed} rows processed · {result.rows_flagged} rows flagged

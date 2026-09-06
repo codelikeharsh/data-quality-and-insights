@@ -41,6 +41,15 @@ class QualityRun(Base):
     run_id = Column(String(16), primary_key=True)
     timestamp = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
     source_file = Column(String(512), nullable=False)
+    # The stable identity a batch of runs belongs to — e.g. "sample_power_data"
+    # for every monthly upload of that same feed, distinct from "retail_sales"
+    # uploaded five minutes later. Without this, /runs mixes unrelated
+    # datasets into one list and a health-score trend chart would plot two
+    # different datasets' scores on the same line. Defaults to the uploaded
+    # filename's stem (see api/main.py) but can be set explicitly so the
+    # same logical dataset stays grouped even if the filename varies
+    # (e.g. "power_supply_2026-04.csv" vs "...2026-05.csv").
+    dataset_name = Column(String(255), nullable=False, index=True, default="default")
     health_score = Column(Integer, nullable=False)
     rows_processed = Column(Integer, nullable=False)
     rows_flagged = Column(Integer, nullable=False)

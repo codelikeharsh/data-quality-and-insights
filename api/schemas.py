@@ -35,6 +35,7 @@ class HealthScoreOut(BaseModel):
 
 class IngestResponse(BaseModel):
     run_id: str
+    dataset_name: str
     source_file: str
     rows_processed: int
     rows_flagged: int
@@ -44,6 +45,7 @@ class IngestResponse(BaseModel):
 
 class RunSummaryOut(BaseModel):
     run_id: str
+    dataset_name: str
     timestamp: datetime
     source_file: str
     health_score: int
@@ -51,6 +53,26 @@ class RunSummaryOut(BaseModel):
     rows_flagged: int
 
     model_config = {"from_attributes": True}
+
+
+class DatasetSummaryOut(BaseModel):
+    dataset_name: str
+    latest_run_id: str
+    latest_run_at: datetime
+    latest_health_score: int
+    rows_processed: int
+    rows_flagged: int
+    run_count: int
+    avg_health_score: float
+    worst_health_score: int
+    best_health_score: int
+
+
+class IssueBreakdownOut(BaseModel):
+    issue_type: str
+    severity: str
+    issue_count: int
+    runs_affected: int
 
 
 class ColumnProfileOut(BaseModel):
