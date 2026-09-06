@@ -8,7 +8,17 @@ matching .env var) without reading Python.
 import os
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 BASE_DIR = Path(__file__).resolve().parent
+
+# Loads .env into the process environment for local (non-Docker) runs —
+# `python-dotenv` was a listed dependency but this call was missing, so a
+# .env file silently did nothing outside Docker Compose (which loads it
+# itself, via its own separate mechanism, for ${VAR} substitution in
+# docker-compose.yml). Safe to call even when no .env file exists (no-op),
+# and never overrides a real environment variable that's already set.
+load_dotenv(BASE_DIR / ".env")
 
 # --- Database -------------------------------------------------------------
 DATABASE_URL = os.getenv(
@@ -24,6 +34,29 @@ DATABASE_URL = os.getenv(
 # still works with zero setup; set it in .env for anything other than
 # solo local use.
 API_KEY = os.getenv("API_KEY", "")
+
+# --- CORS -----------------------------------------------------------------
+# Comma-separated list of origins allowed to call this API from a browser.
+# Defaults to the two local Vite dev ports so `npm run dev` works with zero
+# setup; a deployed environment MUST set ALLOWED_ORIGINS to its real
+# frontend URL(s) — see api/main.py's CORSMiddleware config. Wildcard
+# ("*") is deliberately not the default: it means literally any website
+# could call this API from a visitor's browser, which is fine for a
+# throwaway demo but not a habit worth defaulting to.
+_DEFAULT_ORIGINS = "http://localhost:5173,http://localhost:3000"
+ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in (os.getenv("ALLOWED_ORIGINS") or _DEFAULT_ORIGINS).split(",")
+    if origin.strip()
+]
+
+# --- Ingestion limits -------------------------------------------------------
+# ingest/structured.py loads the whole file into memory via pandas (no
+# chunking/streaming) — benchmarked at ~150MB peak memory for a 1M-row/28MB
+# CSV, so this default gives real headroom above that while still failing
+# fast (see load_structured's docstring) before something large enough to
+# risk an out-of-memory crash gets that far.
+MAX_UPLOAD_SIZE_MB = float(os.getenv("MAX_UPLOAD_SIZE_MB", "500"))
 
 # --- Alerting ---------------------------------------------------------------
 SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL", "")
