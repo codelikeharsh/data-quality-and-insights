@@ -8,29 +8,15 @@ them (e.g. a minimal CI image without the OCR system packages).
 import shutil
 
 import pytest
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 
 from ingest.unstructured import load_unstructured, EXPECTED_COLUMNS
 from quality.rules import consistency_rule, validity_rule
+from tests.conftest import report_font as _report_font
 
 pytestmark = pytest.mark.skipif(
     shutil.which("tesseract") is None, reason="tesseract not installed"
 )
-
-
-def _report_font():
-    # PIL's default bitmap font is tiny and OCRs poorly (tesseract misreads
-    # "Assam" as "sam"). A real TrueType font at a reasonable size is what
-    # makes this test representative of an actual scanned/printed report.
-    for candidate in (
-        "/System/Library/Fonts/Supplemental/Courier New.ttf",
-        "/System/Library/Fonts/Supplemental/Arial.ttf",
-    ):
-        try:
-            return ImageFont.truetype(candidate, 28)
-        except OSError:
-            continue
-    return ImageFont.load_default()
 
 
 def _render_report(lines, path):

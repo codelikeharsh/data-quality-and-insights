@@ -7,12 +7,13 @@ import shutil
 
 import pytest
 from fastapi.testclient import TestClient
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 
 from db.database import Base, engine
 from api.main import app
+from tests.conftest import report_font
 
 
 def _db_available() -> bool:
@@ -43,7 +44,7 @@ def _clean_tables():
 
 
 def _render_scan(tmp_path):
-    font = ImageFont.truetype("/System/Library/Fonts/Supplemental/Courier New.ttf", 28)
+    font = report_font()
     img = Image.new("RGB", (700, 100), color="white")
     draw = ImageDraw.Draw(img)
     draw.text((15, 15), "Assam 1600 1580", fill="black", font=font)

@@ -34,7 +34,7 @@ jobs:
           cache: "pip"
 
       - name: Install system dependencies (OCR)
-        run: sudo apt-get update && sudo apt-get install -y tesseract-ocr poppler-utils
+        run: sudo apt-get update && sudo apt-get install -y tesseract-ocr poppler-utils fonts-dejavu-core
 
       - name: Install Python dependencies
         run: pip install -r requirements-dev.txt
