@@ -1,0 +1,11 @@
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+
+[tool.ruff.lint]
+# Correctness-focused subset: syntax errors, undefined names, unused
+# imports, bare excepts. Deliberately not enabling stylistic/formatting
+# rules (import sorting, docstring conventions, etc.) — the goal is a CI
+# gate that catches real bugs, not a rewrite of every file's style.
+select = ["E9", "F"]
+ignore = ["F401"]  # unused imports: __init__.py re-exports rely on these

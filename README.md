@@ -1,10 +1,16 @@
 # Data Quality & Insights Engine
 
+[![CI](https://github.com/USERNAME/REPO/actions/workflows/ci.yml/badge.svg)](https://github.com/USERNAME/REPO/actions/workflows/ci.yml)
+
 A full-stack data governance tool that ingests **any tabular dataset**
 (CSV/Excel, or a scanned tabular report), automatically profiles and
-quality-checks it against no fixed schema, scores it, stores it with
-lineage, and surfaces the result on a dashboard — with no manual re-running
-required once new data arrives.
+quality-checks it against no fixed schema, scores it transparently, stores
+it with lineage, and surfaces it on a dashboard — with SQL-backed reporting,
+CSV export for downstream BI tools, and no manual re-running required once
+new data arrives.
+
+> Replace `USERNAME/REPO` above with this repo's actual GitHub path once
+> pushed, so the CI badge resolves.
 
 ## The pitch
 
@@ -17,42 +23,43 @@ same questions before trusting a batch:
 - Did the same real-world thing get spelled two different ways somewhere,
   quietly fragmenting every `GROUP BY` downstream?
 - Has the file's shape changed since last time, unannounced?
-- Given all of that, how much can we trust this batch, and exactly why?
+- Given all of that, how much can we trust this batch, and exactly why —
+  and can I hand that answer to someone in Excel or Power BI?
 
 This project automates that check end to end — **ingest → profile → quality
-rules → health score → store with lineage → dashboard → alert** — for
-**whatever columns the file actually has**. Nothing in the rule engine,
-storage layer, or API assumes a fixed schema; every rule either works on
-any dataset by construction (a null-rate check needs no domain knowledge)
-or auto-detects the shape it needs (e.g. "which column looks like a
-reporting period?") rather than having it hardcoded.
+rules → health score → store with lineage → dashboard/SQL reports → alert**
+— for **whatever columns the file actually has**. Nothing in the rule
+engine, storage layer, or API assumes a fixed schema; every rule either
+works on any dataset by construction (a null-rate check needs no domain
+knowledge) or auto-detects the shape it needs (e.g. "which column looks
+like a reporting period?") rather than having it hardcoded.
 
 The bundled demo dataset is Indian state-wise power supply data
 ([`data/samples/sample_power_data.csv`](data/samples/sample_power_data.csv),
-Ministry-of-Power-style, with four intentionally planted problems — see
-below), because a concrete example is easier to reason about than an
-abstract one. It is **one example among many the engine handles**, not the
-thing the engine was built for — see [Proof it's actually generic](#proof-its-actually-generic)
-below, where the exact same code (zero changes) catches four different
-planted problems in a completely different retail-sales dataset with
-different column names.
+with four intentionally planted problems — see below), because a concrete
+example is easier to reason about than an abstract one. It is **one example
+among many the engine handles**, not the thing the engine was built for —
+see [Proof it's actually generic](#proof-its-actually-generic) below, where
+the exact same code (zero changes) catches four different planted problems
+in a completely different retail-sales dataset with different column names.
 
 ## Architecture
 
 ```
                     ┌─────────────────────────────────────────────┐
                     │              React Dashboard                 │
-                    │  Upload · Health trend · Column profile ·     │
-                    │  Data preview · Issues (Vite+Tailwind+Recharts)│
+                    │  Dataset picker · Health trend · Issue        │
+                    │  breakdown (SQL) · Column profile · Data      │
+                    │  preview · CSV export (Vite+Tailwind+Recharts)│
                     └───────────────────┬───────────────────────────┘
-                                        │ HTTP (fetch)
+                                        │ HTTP (fetch, X-API-Key on writes)
                                         ▼
                     ┌─────────────────────────────────────────────┐
                     │                FastAPI (api/)                 │
-                    │  POST /ingest    GET /runs                    │
-                    │  GET /runs/{id}/issues                        │
-                    │  GET /runs/{id}/profile                       │
-                    │  GET /runs/{id}/preview                       │
+                    │  POST /ingest  [auth]   GET /runs?dataset_name │
+                    │  GET /datasets           GET /runs/{id}/issues │
+                    │  GET /reports/issue-breakdown (raw SQL)        │
+                    │  GET /runs/{id}/{profile,preview,export}       │
                     └───────┬───────────────────────────┬───────────┘
                             │                            │
               ┌─────────────▼─────────────┐   ┌──────────▼───────────┐
@@ -68,7 +75,8 @@ different column names.
               │               power-report │   │  high-severity issues  │
               │               shaped only) │   │  (scheduler/alerts.py) │
               │  profiling/  per-column    │   └────────────────────────┘
-              │              stats + JSON  │
+              │              stats + JSON, │
+              │              PER DATASET   │
               │  quality/    7 rule        │
               │              functions +   │
               │              health score, │
@@ -78,10 +86,12 @@ different column names.
                             │
                             ▼
               ┌──────────────────────────────────────┐
-              │            PostgreSQL (db/)            │
+              │      PostgreSQL, Alembic-managed       │
+              │      (db/, migrations/)                │
               │  dataset_rows   — every row, as JSON   │
               │                    (any schema fits)   │
-              │  quality_runs   — one row per run       │
+              │  quality_runs   — one row per run,      │
+              │                    grouped by dataset   │
               │  quality_issues — every flagged issue   │
               │  data_lineage   — source → transforms   │
               │                    → destination        │
@@ -91,13 +101,12 @@ different column names.
 Both ingestion paths (`ingest/structured.py` for CSV/Excel,
 `ingest/unstructured.py` for OCR'd PDFs/images) produce the same shape of
 output — a DataFrame — so profiling, quality rules, scoring, and storage
-never know or care which kind of file the data came from. Note the one
-deliberate scope boundary: the **structured** path (CSV/Excel) is fully
-schema-agnostic; the **OCR** path is not — extracting arbitrary table
-structure from a scanned image is a much harder problem, so it stays
-narrowly scoped to a "label, number, number" row shape (see
-`ingest/unstructured.py`'s docstring). That limitation is stated up front
-rather than glossed over.
+never know or care which kind of file the data came from. One deliberate
+scope boundary: the **structured** path (CSV/Excel) is fully schema-
+agnostic; the **OCR** path is not — extracting arbitrary table structure
+from a scanned image is a much harder problem, so it stays narrowly scoped
+to a "label, number, number" row shape (see `ingest/unstructured.py`'s
+docstring). That limitation is stated up front rather than glossed over.
 
 ## How the engine stays schema-agnostic
 
@@ -111,17 +120,23 @@ Every rule in `quality/rules.py` either:
    that closely matches a much more common one — e.g. "Eastsidee" appearing
    once next to "Eastside" appearing many times — no external reference
    list required), and `schema_drift_rule` (compare this run's columns/
-   dtypes against the previous run's).
+   dtypes against the previous run's, per dataset).
 2. **Auto-detects the column it needs**, rather than requiring one by name:
    `guess_entity_column` and `guess_period_column`
    (`ingest/structured.py`) best-effort pick "the column that looks like a
-   repeating entity" (lowest unique-ratio categorical column) and "the
-   column that looks like a reporting period" (name matches
-   month/date/year/period/quarter/week/fiscal), so `outlier_rule` can
-   compare each entity against its own history and
+   repeating entity" and "the column that looks like a reporting period"
+   (name matches month/date/year/period/quarter/week/fiscal), so
+   `outlier_rule` can compare each entity against its own history and
    `group_completeness_rule` can catch an entity silently missing from one
    period — both skip cleanly (no-op, not an error) on a dataset with
    neither shape.
+
+Every run is also tagged with a **`dataset_name`** (defaults to the
+filename, overridable), so uploading two unrelated files doesn't mix their
+histories: the health-score trend, the SQL issue breakdown, and the
+schema-drift baseline are all scoped to one dataset at a time. This isn't
+cosmetic — a generic engine that let two different datasets' runs share one
+timeline would silently produce a meaningless trend chart.
 
 None of this requires configuration for a new dataset. Point it at a file
 and it works; `config.py`'s `RULE_CONFIG` exists to let an analyst *tune*
@@ -136,7 +151,9 @@ python run_pipeline.py /tmp/retail_sales.csv
 
 Run against a 14-row retail dataset (`month, store_name, units_sold,
 revenue_usd` — completely different columns, zero code changes, zero
-config changes) with four planted problems of its own:
+config changes) with four planted problems of its own, this reliably
+catches all of them (exact scores/counts will vary slightly with rule
+tuning, but the categories won't):
 
 ```
 HEALTH SCORE: 48 / 100
@@ -160,9 +177,11 @@ name appears anywhere in the rule engine.
 
 ## Tech stack
 
-Python · FastAPI · React (plain fetch, Tailwind) · PostgreSQL · SQLAlchemy ·
-pandas/numpy · rapidfuzz (near-duplicate detection) · pytesseract + pdf2image
-(OCR) · APScheduler · Slack webhooks · Docker Compose · pytest
+Python · FastAPI · React (plain fetch, Tailwind, Recharts) · PostgreSQL ·
+SQLAlchemy + Alembic (migrations) · raw SQL (window functions/CTEs) for
+reporting · pandas/numpy · rapidfuzz (near-duplicate detection) ·
+pytesseract + pdf2image (OCR) · APScheduler · Slack webhooks · Docker
+Compose · pytest · ruff · GitHub Actions CI
 
 ## Setup
 
@@ -172,13 +191,14 @@ pandas/numpy · rapidfuzz (near-duplicate detection) · pytesseract + pdf2image
 docker-compose up --build
 ```
 
-This starts three services: `db` (Postgres), `backend` (FastAPI, with the
-scheduler running in-process), and `frontend` (the React dashboard, built
-and served via nginx). Because this dev machine already had a native
-Postgres on 5432 and something else on 8000, the compose file maps to
-**host** ports `5433` (Postgres), `8001` (API), `5173` (frontend) instead of
-the defaults — adjust in [`docker-compose.yml`](docker-compose.yml) if your
-machine is free of those conflicts. Once it's up:
+This starts three services: `db` (Postgres), `backend` (FastAPI — runs
+`alembic upgrade head` on startup, then the scheduler in-process), and
+`frontend` (the React dashboard, built and served via nginx). Because this
+dev machine already had a native Postgres on 5432 and something else on
+8000, the compose file maps to **host** ports `5433` (Postgres), `8001`
+(API), `5173` (frontend) instead of the defaults — adjust in
+[`docker-compose.yml`](docker-compose.yml) if your machine is free of those
+conflicts. Once it's up:
 
 - Dashboard: http://localhost:5173
 - API docs: http://localhost:8001/docs
@@ -191,8 +211,8 @@ docker-compose up -d db
 
 # 2. Backend
 python3 -m venv venv && source venv/bin/activate
-pip install -r requirements.txt
-python -m db.init_db          # creates tables (idempotent)
+pip install -r requirements-dev.txt   # includes requirements.txt + ruff
+python -m db.init_db          # applies Alembic migrations (idempotent)
 uvicorn api.main:app --reload --port 8000
 
 # 3. Frontend (separate terminal)
@@ -203,7 +223,9 @@ npm run dev                    # http://localhost:5173
 
 Copy `.env.example` → `.env` (backend) and `frontend/.env.example` →
 `frontend/.env.local` (frontend) and adjust ports/URLs if you changed the
-Docker mapping.
+Docker mapping. Set `API_KEY` in `.env` (and `VITE_API_KEY` in
+`frontend/.env.local`) if you want the write path locked down — see
+[Auth](#auth) below.
 
 ### Option C — CLI only, no DB/API (fastest way to see the rule engine work)
 
@@ -214,15 +236,60 @@ python run_pipeline.py data/samples/sample_power_data.csv
 python run_pipeline.py /path/to/your_data.csv
 ```
 
+### Schema migrations (Alembic)
+
+The schema lives in `migrations/`, not in a `create_all()` call — a real
+team needs to see how a table changes over time, not just its final shape.
+
+```bash
+alembic upgrade head                              # apply pending migrations
+alembic revision --autogenerate -m "add a column"  # after editing db/models.py
+```
+
 ### Running the test suite
 
 ```bash
-pytest tests/ -v
+pytest tests/ -v      # 63 tests
+ruff check .           # lint
 ```
 
 Tests that need Postgres or `tesseract` self-skip when those aren't
 available, so `pytest` still passes in a minimal environment — the DB/OCR
-tests just won't run. 53 tests total.
+tests just won't run. CI (`.github/workflows/ci.yml`) runs the full suite
+with both available, plus a frontend lint+build job, on every push/PR.
+
+## Auth
+
+`POST /ingest` (the only write endpoint) requires an `X-API-Key` header
+matching `config.API_KEY` — **only if that env var is set**; unset, it's a
+no-op so a fresh clone works with zero setup (see `api/auth.py`). Every
+read endpoint (`/runs`, `/datasets`, `/runs/{id}/*`, `/reports/*`) stays
+open, matching a typical internal reporting-dashboard posture: anyone can
+view, only a known caller can write. This is a single shared secret, not a
+user/session/OAuth system — deliberately small, not a claim of production-
+grade auth.
+
+## SQL-backed reporting
+
+Most of this codebase goes through the ORM or pandas; `db/queries.py` is
+the deliberate exception — hand-written, parameterized SQL for the two
+things that are both clearer and faster to express directly than to
+reconstruct through SQLAlchemy's query builder:
+
+- **`GET /datasets`** — a `ROW_NUMBER() OVER (PARTITION BY dataset_name
+  ORDER BY timestamp DESC)` window function joined against a `GROUP BY`
+  CTE, in one query: each dataset's latest run plus its all-time run count
+  and best/worst/average health score.
+- **`GET /reports/issue-breakdown?dataset_name=...`** — issue-type ×
+  severity counts across every stored run for a dataset, one aggregate
+  query instead of paging through every run's issue list by hand.
+
+## Export
+
+**`GET /runs/{id}/export`** returns a CSV quality report (one row per
+flagged issue, run metadata repeated on each row) — meant for handing to
+Excel, Power BI, or Tableau rather than re-deriving the same numbers there;
+the dashboard link ("Export CSV report") calls this directly.
 
 ## The four seeded problems in the bundled demo (and what catches them)
 
@@ -233,72 +300,82 @@ tests just won't run. 53 tests total.
 | Negative `energy_availability_mu` | Jharkhand, `2026-01` | `validity_rule` |
 | `energy_requirement_mu` = 999999 | Delhi, `2026-03` | `outlier_rule` (median/MAD z-score, per-state history) |
 
-Running the CLI against the sample data scores it **65/100** and lists all
-four issues with a transparent, itemized point breakdown.
-
 ## Data governance concepts, mapped to features (interview talking points)
 
 - **Data profiling** (`profiling/profiler.py`) — the "know your data before
   you judge it" step, computed for any column set. Every run's profile is
-  saved as JSON and doubles as the baseline the next run's schema-drift
-  check compares against.
+  saved as JSON, per dataset, and doubles as the baseline the next run of
+  *that same dataset* compares against for schema drift.
 - **Data quality dimensions, implemented as independent, schema-agnostic
-  rules** (`quality/rules.py`):
-  - *Completeness* — null-rate per column, plus (when an entity+period
-    shape is detected) "did this entity silently stop reporting?"
-  - *Validity* — a numeric column that's almost always non-negative
-    flags its rare negative values as likely data-entry/unit errors — a
-    relative, data-driven check, not a hardcoded domain constant.
-  - *Accuracy / plausibility* — outlier detection catches decimal/unit
-    errors a schema check alone would miss, on every numeric column.
-  - *Consistency* — self-referential near-duplicate detection catches the
-    exact kind of naming drift that silently fragments a `GROUP BY` or
-    breaks a join, without needing an external reference list.
-  - *Uniqueness* — exact-duplicate-row detection.
-  - *Schema stability* — drift detection flags a new/missing/retyped
-    column before it breaks something downstream.
+  rules** (`quality/rules.py`): completeness (null-rate, plus "did this
+  entity silently stop reporting"), validity (a numeric column that's
+  almost always non-negative flags its rare negative values — a relative,
+  data-driven check, not a hardcoded domain constant), accuracy/
+  plausibility (outlier detection on every numeric column), consistency
+  (self-referential near-duplicate detection, no external reference list
+  needed), uniqueness (exact-duplicate-row detection), schema stability
+  (drift detection, per dataset).
 - **Transparent scoring, not a black box** (`quality/health_score.py`) — a
   data health score means nothing to a governance stakeholder if they can't
   see why it dropped. Every point deducted is itemized by issue type and
-  weight, and weights live in one config file an analyst can tune without
-  reading code.
+  weight, weights live in one config file, and a CSV export of that
+  breakdown is one click away.
 - **Lineage** (`db/models.py::DataLineage`) — every run records its source
-  file, the transformations applied, and its destination table. This is the
-  minimum viable answer to "where did this number in the dashboard actually
-  come from?"
+  file, the transformations applied, and its destination table.
 - **Schema-agnostic storage** (`db/models.py::DatasetRow`) — every ingested
   row is stored as JSON rather than fixed columns, so a new dataset shape
-  needs zero migrations.
-- **Source-agnostic structured ingestion** — the rule engine, profiler, and
-  storage layer don't know or care what columns a CSV/Excel file has.
+  needs zero migrations; the *structural* schema (the four tables
+  themselves) still goes through proper Alembic migrations.
 - **Automation with a human-legible audit trail** — the scheduler doesn't
   just "run stuff on a timer"; every automated run still produces the same
-  scored, itemized, stored record a manual run would, plus an alert when
-  something needs attention.
+  scored, itemized, stored, exportable record a manual run would, plus a
+  Slack alert when something needs attention.
+- **Reporting for non-technical stakeholders** — the dashboard's dataset
+  picker, SQL-backed issue-breakdown chart, and CSV export exist because a
+  data quality signal that only a Python script can read isn't actually
+  useful to a governance/ops audience.
 
-## Configuration
+## Known limitations
 
-Every rule's on/off switch and penalty weight lives in [`config.py`](config.py)
-(`RULE_CONFIG`), not scattered through the codebase — an analyst should be
-able to retune thresholds without touching rule logic. See
-[`.env.example`](.env.example) for runtime config (DB connection, Slack
-webhook, alert threshold, scheduler interval).
+Written down deliberately, not because they came up in review, but because
+an honest account of scope boundaries is worth more than pretending a
+demo-sized project has none:
+
+- **OCR ingestion is narrow.** It extracts "label, number, number" rows via
+  regex, not arbitrary table structure — and tesseract itself starts
+  laying text out in columns instead of rows once a scanned image has
+  enough repeated lines, which can break the row-based extractor on a
+  larger scan. Structured (CSV/Excel) ingestion has no such limit.
+- **Statistical thresholds are hand-tuned, not empirically validated** (the
+  90% non-negative ratio for validity, the 20% null threshold for
+  completeness, a fuzzy-match score of 60 for consistency). They were
+  iterated against test cases and real sample data, not derived from a
+  formal study — reasonable for a v1, worth stating rather than implying
+  otherwise.
+- **No streaming ingestion.** A file is loaded into memory via pandas in
+  full; a multi-GB file would need chunked processing this doesn't do.
+- **Auth is a single shared API key**, not per-user accounts or roles — see
+  [Auth](#auth) above.
 
 ## Project layout
 
 ```
 ingest/       structured.py (any CSV/Excel schema) + unstructured.py (OCR,
               scoped to power-report-shaped scans — see its docstring)
-profiling/    per-column stats -> JSON, for any column set
+profiling/    per-column stats -> JSON, per dataset
 quality/      7 schema-agnostic rule functions + health scoring, each
               independently testable
-db/           SQLAlchemy models (JSON row storage), storage, schema.sql
-api/          FastAPI app + generic per-run profile/preview aggregation
-frontend/     React + Tailwind + Recharts dashboard (renders whatever
-              columns a run's profile/preview actually returns)
+db/           SQLAlchemy models (JSON row storage), storage, queries.py
+              (hand-written SQL for reporting), schema.sql reference
+migrations/   Alembic migrations — the schema's actual source of truth
+api/          FastAPI app, auth.py (API-key dependency), generic per-run
+              profile/preview/export, SQL-backed dataset/report endpoints
+frontend/     React + Tailwind + Recharts dashboard: dataset picker, health
+              trend, issue breakdown, column profile, data preview, export
 scheduler/    watch-folder automation + Slack alerting
-tests/        pytest suite (rule-engine tests need no infra; DB/OCR tests
-              self-skip)
+tests/        63 pytest tests (rule-engine/auth tests need no infra; DB/OCR
+              tests self-skip without Postgres/tesseract)
+.github/      CI: pytest + ruff (backend), oxlint + build (frontend)
 data/samples/ demo power-sector CSV + synthetic scanned-report PNG/PDF for
               OCR testing
 ```
