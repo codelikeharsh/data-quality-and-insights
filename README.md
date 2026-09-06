@@ -1,6 +1,11 @@
 # Data Quality & Insights Engine
 
-[![CI](https://github.com/USERNAME/REPO/actions/workflows/ci.yml/badge.svg)](https://github.com/USERNAME/REPO/actions/workflows/ci.yml)
+[![CI](https://github.com/codelikeharsh/data-quality-and-insights/actions/workflows/ci.yml/badge.svg)](https://github.com/codelikeharsh/data-quality-and-insights/actions/workflows/ci.yml)
+
+**Live demo:** [dashboard](https://data-quality-and-insights-1.onrender.com) ·
+[API docs](https://data-quality-and-insights.onrender.com/docs)
+(hosted on Render's free tier — the backend spins down after 15 minutes of
+inactivity, so the first request after a while can take 30-50s to wake up)
 
 A full-stack data governance tool that ingests **any tabular dataset**
 (CSV/Excel, or a scanned tabular report), automatically profiles and
@@ -8,9 +13,6 @@ quality-checks it against no fixed schema, scores it transparently, stores
 it with lineage, and surfaces it on a dashboard — with SQL-backed reporting,
 CSV export for downstream BI tools, and no manual re-running required once
 new data arrives.
-
-> Replace `USERNAME/REPO` above with this repo's actual GitHub path once
-> pushed, so the CI badge resolves.
 
 ## The pitch
 
