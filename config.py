@@ -161,6 +161,15 @@ RULE_CONFIG = {
                                        # OTHER occurrences of something more
                                        # common before it's flagged as a
                                        # likely typo of that more-common value
+        "max_common_candidates": 300, # cap on how many distinct "common"
+                                       # values a rare value gets fuzzy-
+                                       # matched against (top N by
+                                       # frequency) — bounds the comparison
+                                       # work on a column with thousands of
+                                       # common values (e.g. a large product
+                                       # catalog); a real ingest with ~2,000
+                                       # unique values on both sides took
+                                       # ~29s uncapped, ~0.3s capped
     },
     "schema_drift": {
         "enabled": True,

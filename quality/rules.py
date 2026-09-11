@@ -305,31 +305,53 @@ def consistency_rule(
         if not common_values:
             continue  # nothing frequent enough to compare rare values against
 
+        # Cap the "common" candidate set fuzzy-matched against. Without this,
+        # a column with thousands of common values (e.g. a large product
+        # catalog) makes every rare-value comparison scan the whole set —
+        # this bounds the work regardless of how large that set actually
+        # gets, at the cost of only checking a rare value against the N
+        # most-frequent values rather than all of them (the correct match
+        # is overwhelmingly likely to be among the most frequent anyway —
+        # that's what "common" means here).
+        max_common_candidates = config.get("max_common_candidates", 300)
+        if len(common_values) > max_common_candidates:
+            common_values = counts.loc[common_values].nlargest(max_common_candidates).index.tolist()
+
         rare_values = counts[counts < min_value_count].index.tolist()
-        for rare in rare_values:
-            candidates = [v for v in common_values if v != rare]
-            if not candidates:
+        if not rare_values:
+            continue
+
+        # Vectorized batch scoring (one C-level call) instead of calling
+        # process.extractOne per rare value in a Python loop — the loop
+        # version is O(rare x common) with real per-call Python overhead on
+        # top, and got measurably slow (tens of seconds) once both sides
+        # reached the low thousands on a real ingest. cdist computes the
+        # full score matrix at once and is roughly two orders of magnitude
+        # faster for the same comparison count.
+        score_matrix = process.cdist(rare_values, common_values, scorer=fuzz.WRatio)
+
+        for row_idx, rare in enumerate(rare_values):
+            row_scores = score_matrix[row_idx]
+            best_col_idx = row_scores.argmax()
+            score = row_scores[best_col_idx]
+            if score < threshold:
                 continue
-            best = process.extractOne(rare, candidates, scorer=fuzz.WRatio)
-            if best is None:
-                continue
-            match, score, _ = best
-            if score >= threshold:
-                for idx in df.index[non_null == rare]:
-                    issues.append(
-                        Issue(
-                            row_reference=idx,
-                            column=column,
-                            issue_type="consistency",
-                            description=(
-                                f"'{rare}' in column '{column}' closely matches the far "
-                                f"more common value '{match}' ({score:.0f}% similarity) — "
-                                f"likely a naming inconsistency that will break "
-                                f"joins/counts"
-                            ),
-                            severity="medium",
-                        )
+            match = common_values[best_col_idx]
+            for idx in df.index[non_null == rare]:
+                issues.append(
+                    Issue(
+                        row_reference=idx,
+                        column=column,
+                        issue_type="consistency",
+                        description=(
+                            f"'{rare}' in column '{column}' closely matches the far "
+                            f"more common value '{match}' ({score:.0f}% similarity) — "
+                            f"likely a naming inconsistency that will break "
+                            f"joins/counts"
+                        ),
+                        severity="medium",
                     )
+                )
     return issues
 
 

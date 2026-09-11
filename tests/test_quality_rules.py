@@ -162,6 +162,30 @@ def test_consistency_no_flag_for_exact_match():
     assert consistency_rule(df) == []
 
 
+def test_consistency_scales_to_thousands_of_candidates():
+    """Regression test: this used to call rapidfuzz's extractOne once per
+    rare value in a Python loop, which took ~28s in production on a
+    5,000-row column with ~2,000 unique values (a real ingest that
+    appeared to "hang" — no error, just very slow). Now vectorized via
+    process.cdist; must stay fast regardless of candidate-set size."""
+    import time
+    import random
+
+    random.seed(3)
+    customers = [f"Customer Name {i}" for i in range(2000)]
+    df = pd.DataFrame(
+        {
+            "order_id": range(5000),
+            "customer": [random.choice(customers) for _ in range(5000)],
+        }
+    )
+    start = time.time()
+    issues = consistency_rule(df)
+    elapsed = time.time() - start
+    assert elapsed < 5.0, f"consistency_rule took {elapsed:.1f}s — expected well under 5s"
+    assert len(issues) > 0  # random near-duplicate names should still be caught
+
+
 def test_consistency_skips_high_cardinality_free_text_column():
     """A column where almost every value is unique (e.g. free-text notes or
     an ID) isn't categorical — fuzzy-matching it would just produce noise."""
