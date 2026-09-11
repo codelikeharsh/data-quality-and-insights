@@ -61,3 +61,16 @@ def test_load_structured_rejects_oversized_file(tmp_path, monkeypatch):
 
     with pytest.raises(ValueError, match="exceeds"):
         load_structured(csv_path)
+
+
+def test_load_structured_handles_windows_1252_encoding(tmp_path):
+    """A CSV exported from Excel on Windows is commonly cp1252, not UTF-8 —
+    this regressed in production: a file containing '(TM)' (byte 0x99 in
+    cp1252) failed with 'utf-8 codec can't decode byte 0x99'."""
+    csv_path = tmp_path / "windows_export.csv"
+    content = "product,price\nSuperWidget™,19.99\n"  # ™ = (TM) symbol
+    csv_path.write_bytes(content.encode("cp1252"))
+
+    df = load_structured(csv_path)
+    assert df.loc[0, "product"] == "SuperWidget™"
+    assert df.loc[0, "price"] == 19.99

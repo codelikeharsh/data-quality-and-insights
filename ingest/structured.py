@@ -65,6 +65,30 @@ def _auto_coerce_numeric(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+# Real-world CSVs aren't always UTF-8 — a file exported from Excel on
+# Windows is commonly Windows-1252, which trips pandas' UTF-8 default the
+# moment it contains a curly quote, em-dash, or a (TM)/(R) symbol. Tried in
+# order: utf-8-sig (plain UTF-8, and handles a leading BOM some tools add),
+# then the common Windows export encoding, then latin-1 as a guaranteed-to-
+# succeed last resort (it maps every byte 0-255 to a character, so it never
+# raises — better to risk a mis-decoded rare character than to fail the
+# whole ingest on an encoding guess).
+_CSV_ENCODING_FALLBACKS = ("utf-8-sig", "cp1252", "latin-1")
+
+
+def _read_csv_with_encoding_fallback(file_path: Path) -> pd.DataFrame:
+    last_error: UnicodeDecodeError | None = None
+    for encoding in _CSV_ENCODING_FALLBACKS:
+        try:
+            return pd.read_csv(file_path, encoding=encoding)
+        except UnicodeDecodeError as exc:
+            last_error = exc
+            continue
+    # Unreachable in practice — latin-1 never raises — but keeps this
+    # honest about what happens if every fallback somehow fails.
+    raise last_error
+
+
 _PERIOD_NAME_PATTERN = re.compile(r"(month|date|year|period|quarter|week|fiscal)", re.IGNORECASE)
 
 
@@ -119,6 +143,9 @@ def guess_entity_column(df: pd.DataFrame, exclude: set[str] | None = None) -> st
 def load_structured(file_path: str | Path) -> pd.DataFrame:
     """Load a CSV or Excel file into a DataFrame, whatever columns it has.
 
+    - Reads CSV with an encoding fallback chain (utf-8-sig -> cp1252 ->
+      latin-1) instead of pandas' strict UTF-8 default, so a Windows/Excel-
+      exported file with a curly quote or (TM) symbol doesn't hard-fail.
     - Strips whitespace from every string cell (a common source of
       consistency issues, e.g. "Odisha " vs "Odisha").
     - Standardizes column names.
@@ -147,7 +174,7 @@ def load_structured(file_path: str | Path) -> pd.DataFrame:
         )
 
     if suffix == ".csv":
-        df = pd.read_csv(file_path)
+        df = _read_csv_with_encoding_fallback(file_path)
     elif suffix in (".xlsx", ".xls"):
         df = pd.read_excel(file_path)
     else:
