@@ -373,10 +373,32 @@ demo-sized project has none:
   larger scan. Structured (CSV/Excel) ingestion has no such limit.
 - **Statistical thresholds are hand-tuned, not empirically validated** (the
   90% non-negative ratio for validity, the 20% null threshold for
-  completeness, a fuzzy-match score of 60 for consistency). They were
-  iterated against test cases and real sample data, not derived from a
-  formal study — reasonable for a v1, worth stating rather than implying
-  otherwise.
+  completeness, a fuzzy-match score of 60 for consistency, a modified
+  z-score cutoff of 3.5 for outliers). They were iterated against test
+  cases and real sample data, not derived from a formal study — reasonable
+  for a v1, worth stating rather than implying otherwise.
+- **Outlier detection assumes roughly symmetric distributions.** The
+  median/MAD z-score method is robust to a single extreme value skewing the
+  baseline, but it isn't a fit for naturally right-skewed data — real
+  retail pricing, for instance, where a product category legitimately spans
+  a handful of dollars to several hundred, with many genuine values on the
+  high side. Verified against a real 9,426-row orders dataset: prices from
+  $2.22 to $363.25 within one product subcategory, all genuine, still
+  produced flagged "outliers" purely from the skew, not from any actual
+  data error. A log-transform before scoring positively-skewed columns
+  would fix this; not implemented.
+- **Column-role auto-detection is name/cardinality heuristics, not
+  guaranteed correct.** `guess_entity_column` requires at least 10 distinct
+  values (so a 3-value status-flag column like "shipping mode" doesn't
+  masquerade as a meaningful grouping dimension), `guess_period_column`
+  requires at most 60 (so an almost-per-row "order_date" with 1,000+
+  distinct days doesn't get treated as a coarse reporting period), and
+  `guess_id_like_numeric_columns` excludes numeric columns whose name
+  matches a small set of identifier patterns (`*_id`, `postal_code`, ...)
+  from outlier detection. All three floors/ceilings were chosen to fix
+  specific real failures (see their docstrings in `ingest/structured.py`)
+  and are reasonable defaults, not proofs — a dataset shaped unusually
+  enough could still fool any of them.
 - **No streaming ingestion.** A file is loaded into memory via pandas in
   full — several of the quality rules (duplicate detection, per-entity
   outlier grouping) fundamentally need the whole dataset in memory at once

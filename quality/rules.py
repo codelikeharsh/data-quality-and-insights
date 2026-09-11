@@ -417,6 +417,7 @@ def run_all_rules(
     group_by: str | None = None,
     period_by: str | None = None,
     baseline_profile: dict | None = None,
+    id_columns: set[str] | None = None,
 ) -> list[Issue]:
     """Run every enabled rule and return the combined, flat issue list.
 
@@ -426,18 +427,25 @@ def run_all_rules(
     and, when the caller is run_pipeline, auto-detected (see
     ingest.structured.guess_entity_column / guess_period_column) rather than
     hardcoded — a dataset with neither shape just skips the rules that need
-    them.
+    them. `id_columns`, if given (see
+    ingest.structured.guess_id_like_numeric_columns), excludes those
+    numeric columns from outlier_rule — an identifier isn't a measurement,
+    so "statistically far from other IDs" isn't a real signal.
     """
     outlier_config = dict(RULE_CONFIG["outlier"])
     if group_by:
         outlier_config["group_by"] = group_by
+
+    outlier_columns = None
+    if id_columns:
+        outlier_columns = [c for c in df.select_dtypes(include="number").columns if c not in id_columns]
 
     issues: list[Issue] = []
     issues += completeness_rule(df)
     issues += group_completeness_rule(df, entity_column=group_by, period_column=period_by)
     issues += duplicate_rule(df)
     issues += validity_rule(df)
-    issues += outlier_rule(df, config=outlier_config)
+    issues += outlier_rule(df, columns=outlier_columns, config=outlier_config)
     issues += consistency_rule(df)
     issues += schema_drift_rule(df, baseline_profile=baseline_profile)
     return issues

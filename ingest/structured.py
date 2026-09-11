@@ -92,34 +92,106 @@ def _read_csv_with_encoding_fallback(file_path: Path) -> pd.DataFrame:
 _PERIOD_NAME_PATTERN = re.compile(r"(month|date|year|period|quarter|week|fiscal)", re.IGNORECASE)
 
 
-def guess_period_column(df: pd.DataFrame) -> str | None:
+def guess_period_column(df: pd.DataFrame, max_unique_count: int = 60) -> str | None:
     """Best-effort guess at which column (if any) represents a reporting
     period ("month", "date", "fiscal_year", ...) — used together with
     guess_entity_column so run_pipeline can check "did every entity that
     ever reports also report THIS period?" without hardcoding either
     column's name. Name-based only (not a real date-parser) since a
     generic dataset's period column can be a plain label ("2026-02", "Q1")
-    rather than a parseable date."""
+    rather than a parseable date.
+
+    `max_unique_count` caps how many distinct values a column can have and
+    still count as a "period" — this matters because a name match alone
+    doesn't distinguish a genuine reporting period (a handful of months or
+    quarters) from a per-row timestamp (an "order_date" column with a
+    near-distinct value for almost every row). This regressed in
+    production: a real orders dataset's "order_date" column had 1,419
+    distinct individual calendar dates, and group_completeness_rule
+    dutifully checked whether every product subcategory had at least one
+    order on literally every one of those 1,419 days — a nonsensical bar
+    that produced 17,571 false "missing" flags. 60 covers the realistic
+    range of genuine reporting periods (daily for ~2 months, weekly for a
+    year, monthly for 5 years, quarterly, yearly) while excluding anything
+    that's really a per-row date.
+    """
     for col in df.columns:
         if _PERIOD_NAME_PATTERN.search(col):
+            if df[col].nunique(dropna=True) > max_unique_count:
+                continue  # too fine-grained to be a genuine reporting period
             return col
     return None
 
 
-def guess_entity_column(df: pd.DataFrame, exclude: set[str] | None = None) -> str | None:
+_ID_NAME_PATTERN = re.compile(r"(^id$|_id$|^id_|postal.?code|zip.?code)", re.IGNORECASE)
+
+
+def guess_id_like_numeric_columns(df: pd.DataFrame) -> set[str]:
+    """Numeric columns whose name looks like an identifier ("row_id",
+    "customer_id", "postal_code", ...) rather than a measurement — these
+    get excluded from outlier_rule's default column set. "This ID number
+    is statistically far from other ID numbers" isn't a data quality
+    signal; IDs aren't drawn from a distribution, they're just labels that
+    happen to be numbers. This regressed in production: a real dataset's
+    sequential "row_id" column got flagged as having hundreds of
+    "statistical outliers" simply because grouping split the roughly-
+    uniform 1..9426 range into uneven chunks, each with its own median —
+    numerically true, semantically meaningless.
+
+    Deliberately narrower than "every numeric column with a near-unique
+    ratio" — a genuine measurement (e.g. a precise sensor reading) can also
+    be near-unique, and un-flagging every such column would silently
+    disable outlier detection on real measurements too. Name-based, same
+    approach as guess_period_column, so it only fires on the specific
+    pattern that actually means "this is a label, not a measurement".
+    """
+    numeric_cols = set(df.select_dtypes(include="number").columns)
+    return {col for col in numeric_cols if _ID_NAME_PATTERN.search(col)}
+
+
+def guess_all_period_like_columns(df: pd.DataFrame) -> set[str]:
+    """Every column name matching the period pattern, not just the one
+    guess_period_column picks as THE period — a dataset can have more than
+    one date-ish column (e.g. "order_date" and "ship_date"), and every one
+    of them should be excluded from guess_entity_column's candidates, not
+    just the first. A date column becoming "the entity" makes no sense —
+    the whole point of an entity column is a repeating identity to compare
+    each group against its own history."""
+    return {col for col in df.columns if _PERIOD_NAME_PATTERN.search(col)}
+
+
+def guess_entity_column(
+    df: pd.DataFrame, exclude: set[str] | None = None, min_unique_count: int = 10
+) -> str | None:
     """Best-effort guess at which column (if any) identifies "the thing this
     row is about" — e.g. a state, a store, a product — so outlier detection
     can compare each entity against its own history instead of the whole
-    column. Heuristic: the text column with the lowest unique-value ratio
-    that still has more than one distinct value (a column where every value
-    is unique is an ID, not a repeating entity — and one where every value
-    is the SAME isn't a grouping dimension either).
+    column. Heuristic: among columns with AT LEAST `min_unique_count`
+    distinct values, pick the one with the lowest unique-value ratio (still
+    excluding a column where every value is unique — that's an ID, not a
+    repeating entity).
 
-    `exclude` should be given the result of guess_period_column(df) when
-    both are used together (see run_pipeline.py) — a reporting-period
-    column (e.g. "month") is very likely to ALSO have low cardinality, and
-    without excluding it explicitly this heuristic would pick the period
-    over the actual entity purely because it repeats even more.
+    The min_unique_count floor matters more than it looks: a real dataset
+    often has several very-low-cardinality "status flag" columns (a
+    shipping mode with 3 values, a region with 4, a customer segment with
+    4) sitting alongside a genuinely meaningful grouping dimension (a
+    product subcategory with 17 values, a state with 49). Minimizing the
+    ratio with NO floor picks whichever status flag happens to have the
+    fewest values — grouping outlier detection into 3 giant, semantically
+    meaningless buckets, which is *worse* than not grouping at all (it
+    mixes unrelated sub-populations into one "normal" baseline and floods
+    the result with false-positive outliers). This regressed in production
+    on a real 9,426-row orders dataset: it picked a 3-value shipping-mode
+    column over a 17-value product-subcategory column sitting right next
+    to it, and outlier_rule flagged 7,660 issues as a result.
+
+    `exclude` should be given the result of guess_period_column(df) — and
+    ideally every OTHER column that also looks like a period, not just the
+    one chosen as THE period (see run_pipeline.py) — when both are used
+    together. A reporting-period column (e.g. "month") is very likely to
+    ALSO have low cardinality, and without excluding it explicitly this
+    heuristic would pick the period over the actual entity purely because
+    it repeats even more.
     """
     exclude = exclude or set()
     best_col, best_ratio = None, 1.0
@@ -131,7 +203,7 @@ def guess_entity_column(df: pd.DataFrame, exclude: set[str] | None = None) -> st
         if col in exclude:
             continue
         nunique = df[col].nunique(dropna=True)
-        if nunique <= 1 or nunique == n:
+        if nunique < min_unique_count or nunique == n:
             continue
         ratio = nunique / n
         if ratio < best_ratio:

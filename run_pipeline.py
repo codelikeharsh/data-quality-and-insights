@@ -14,7 +14,12 @@ import uuid
 from pathlib import Path
 
 from ingest import load_structured
-from ingest.structured import guess_entity_column, guess_period_column
+from ingest.structured import (
+    guess_all_period_like_columns,
+    guess_entity_column,
+    guess_id_like_numeric_columns,
+    guess_period_column,
+)
 from profiling import profile_dataframe, save_profile, load_profile
 from quality import run_all_rules, compute_health_score
 
@@ -83,9 +88,17 @@ def run_pipeline(
     # against its own history, and group_completeness_rule can catch an
     # entity silently missing from one period.
     period_column = guess_period_column(df)
-    entity_column = guess_entity_column(df, exclude={period_column} if period_column else None)
+    # Exclude every date-like column from entity candidacy, not just the
+    # one chosen as THE period — a dataset can have more than one (e.g.
+    # "order_date" and "ship_date"); neither should ever become "the entity".
+    entity_column = guess_entity_column(df, exclude=guess_all_period_like_columns(df))
+    id_columns = guess_id_like_numeric_columns(df)
     issues = run_all_rules(
-        df, group_by=entity_column, period_by=period_column, baseline_profile=baseline_profile
+        df,
+        group_by=entity_column,
+        period_by=period_column,
+        baseline_profile=baseline_profile,
+        id_columns=id_columns,
     )
 
     # 4. Health score
