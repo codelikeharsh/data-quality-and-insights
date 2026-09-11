@@ -4,8 +4,10 @@ Integration tests for the storage layer — require a running Postgres
 so `pytest` still passes in an environment with no Docker (e.g. the Stage 1
 rule-engine tests should never depend on infrastructure being up).
 """
+import time
 from pathlib import Path
 
+import pandas as pd
 import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
@@ -76,5 +78,30 @@ def test_stored_rows_include_seeded_delhi_outlier():
             r for r in rows if r.data.get("state_name") == "Delhi" and r.data.get("month") == "2026-03"
         )
         assert delhi_march.data["energy_requirement_mu"] == 999999.0
+    finally:
+        db.close()
+
+
+def test_store_pipeline_result_bulk_inserts_stay_fast():
+    """Regression test: storing rows/issues used to be one db.add() per
+    row, which for a real 5,000-row ingest took ~20s in production purely
+    on insert round-trip latency (thousands of individual INSERTs) — long
+    enough to read as a hang with zero error. Now a bulk INSERT; must stay
+    fast regardless of row count."""
+    df = pd.DataFrame(
+        {
+            "id": range(2000),
+            "value": [i % 7 for i in range(2000)],
+        }
+    )
+    result = run_pipeline("synthetic.csv", verbose=False, df=df)
+
+    db = SessionLocal()
+    try:
+        start = time.time()
+        run = store_pipeline_result(db, result, df)
+        elapsed = time.time() - start
+        assert elapsed < 10.0, f"store_pipeline_result took {elapsed:.1f}s for 2,000 rows — expected well under 10s"
+        assert db.query(DatasetRow).filter_by(source_run_id=run.run_id).count() == 2000
     finally:
         db.close()

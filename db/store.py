@@ -11,6 +11,7 @@ no DB involved at all).
 import math
 
 import pandas as pd
+from sqlalchemy import insert
 from sqlalchemy.orm import Session
 
 from db.models import DatasetRow, QualityRun, QualityIssue, DataLineage, DatasetProfile
@@ -49,26 +50,44 @@ def store_pipeline_result(db: Session, result: dict, df: pd.DataFrame) -> Qualit
             )
         )
 
-    for idx, row in df.iterrows():
-        db.add(
-            DatasetRow(
-                row_index=int(idx),
-                data=_json_safe_record(row.to_dict()),
-                source_run_id=result["run_id"],
-            )
-        )
+    # The bulk INSERTs below are plain SQLAlchemy Core execute() calls, which
+    # (unlike ORM query methods) do NOT autoflush pending db.add()'d objects
+    # first — without this explicit flush, `run`'s row wouldn't exist yet
+    # when dataset_rows' FK to it is checked, and every insert below would
+    # fail with a ForeignKeyViolation despite `run` looking "already added".
+    db.flush()
 
-    for issue in result["issues"]:
-        db.add(
-            QualityIssue(
-                run_id=result["run_id"],
-                row_reference=str(issue["row_reference"]),
-                column=issue["column"],
-                issue_type=issue["issue_type"],
-                description=issue["description"],
-                severity=issue["severity"],
-            )
-        )
+    # Bulk INSERT (SQLAlchemy Core, not one db.add() per row) — with the ORM
+    # loop this used to be, a 5,000-row file produced ~5,800 individual
+    # round trips to Postgres and took ~20s in production purely on insert
+    # latency, with the rule engine itself long since done. A single
+    # multi-row INSERT (SQLAlchemy 2.x batches this automatically via
+    # "insertmanyvalues" for psycopg2) does the same work in a small
+    # handful of round trips.
+    if len(df) > 0:
+        row_dicts = [
+            {
+                "row_index": int(idx),
+                "data": _json_safe_record(row.to_dict()),
+                "source_run_id": result["run_id"],
+            }
+            for idx, row in df.iterrows()
+        ]
+        db.execute(insert(DatasetRow), row_dicts)
+
+    if result["issues"]:
+        issue_dicts = [
+            {
+                "run_id": result["run_id"],
+                "row_reference": str(issue["row_reference"]),
+                "column": issue["column"],
+                "issue_type": issue["issue_type"],
+                "description": issue["description"],
+                "severity": issue["severity"],
+            }
+            for issue in result["issues"]
+        ]
+        db.execute(insert(QualityIssue), issue_dicts)
 
     db.add(
         DataLineage(
